@@ -12,6 +12,20 @@ that is working.
 
 ---
 
+## Where it runs, and why there
+
+The default is **us-west1 (Oregon)**, not `asia-northeast1`, and that is a
+deliberate owner decision recorded in CLAUDE.md. Two reasons: `e2-micro` is only
+free-tier eligible in us-west1, us-central1 and us-east1, and `api.typesafe.ai`
+resolves into AWS us-west-2 — also Oregon — so the model call drops from roughly
+a 100ms round trip out of Tokyo to roughly 10ms. That matters more than it
+sounds: `decide` gates any answer older than 2s, so model latency is what
+decides whether a run produces signals at all.
+
+The cost is that the bitbank book arrives ~55ms later than it would from Tokyo.
+At the configured 3s cadence that is under 2% of a tick. **Revisit before phase
+4**, where fills depend on the round trip to Tokyo rather than to Oregon.
+
 ## What runs where
 
 ```
@@ -151,7 +165,7 @@ start-up never waits for `apt` to finish.
 First minutes:
 
 ```bash
-gcloud compute ssh jev-tick-lab --zone asia-northeast1-b --tunnel-through-iap \
+gcloud compute ssh jev-tick-lab --zone us-west1-b --tunnel-through-iap \
   -- journalctl -u jev-tick-lab -f
 ```
 
@@ -161,7 +175,7 @@ Expect, in order: `started`, one `not ready` while the book is unseeded, five
 After an hour, ask the question that matters:
 
 ```bash
-gcloud compute ssh jev-tick-lab --zone asia-northeast1-b --tunnel-through-iap \
+gcloud compute ssh jev-tick-lab --zone us-west1-b --tunnel-through-iap \
   -- sudo -u jevbot /opt/jev-tick-lab/logcheck -dir /opt/jev-tick-lab/data -window 1h
 ```
 
@@ -259,72 +273,87 @@ thresholds, all of which are recorded in `runs-YYYY-MM-DD.jsonl` at start-up.
 
 ## Cost
 
-List prices, `asia-northeast1`, checked September 2026. E2 machine types get no
-sustained-use discount, so the sticker price is what you pay.
+List prices checked September 2026. The default configuration is built to sit
+inside the GCP Always Free tier, which is the whole reason it runs in Oregon
+rather than Tokyo.
 
-### The machine
+### The machine: about $3/month
 
-| item | rate | per month |
+| item | | per month |
 |---|---|---|
-| e2-micro (default) | $0.0107/hr | **$7.84** |
-| 20GB pd-balanced | $0.13/GB | **$2.60** |
-| external IPv4, attached to a running VM | $0.004/hr | **$2.92** |
-| GCS standard, a month of ticks (~2.7GB) | | **under $0.10** |
-| | | **≈ $13.40/month, or $0.44/day** |
+| e2-micro in us-west1 | Always Free | **$0** |
+| 30GB pd-standard | Always Free (30 GB-months) | **$0** |
+| external IPv4 | $0.004/hr, not covered | **$2.92** |
+| GCS standard, ~2.6GB | | **$0.06** |
+| egress to the model API | ~3.3GB, 1GB free from N. America | **$0.28** |
+| | | **≈ $3.26/month, or $0.11/day** |
 
-Swaps, if it matters: e2-small is $15.69 instead of $7.84; pd-standard is $1.04
-instead of $2.60 for the same 20GB.
+What forfeits the free tier, in order of how easily it happens by accident:
 
-### The model calls, which are the actual bill
+- **A second VM.** The allowance is one e2-micro's worth of hours per month,
+  pooled across us-west1, us-central1 and us-east1. One pair per process means
+  a second pair is a second VM, and it is billed in full.
+- **A bigger machine.** Only `e2-micro` qualifies. e2-small is about $12/month.
+- **A bigger or faster disk.** Only standard persistent disk, only up to 30GB.
+  pd-balanced would be roughly $3/month for the same size.
+- The region. asia-northeast1 is not eligible at all; there an identical
+  e2-micro is $7.84/month and the disk is $1.56.
+
+### The model calls, which are still the actual bill
 
 **These are assumptions until `cmd/preflight` has run.** The request measures
 3,863 bytes, which a bytes-per-token estimate puts at 860–1,100 tokens against
 the repository's assumed 1,500 — except that batched questions are evaluated in
 isolation, and if the state is re-tokenised per question the real figure is
-several times higher, not lower. One preflight call settles it.
+several times higher, not lower. One call settles it.
 
-Using the repository's own figures — ~1,500 input tokens per call at $0.042 per
-million, output not billed:
+At the assumed ~1,500 input tokens and $0.042 per million, output not billed:
 
-| cadence | per day | per month |
-|---|---|---|
-| 1 call/sec, 24h | **$5.44** | $163 |
-| 1 call/sec, 8h | $1.81 | $54 |
-| 1 call/2sec, 24h | $2.72 | $82 |
+| cadence | calls/day | per day | per month |
+|---|---|---|---|
+| **3s (the configured default)** | 28,800 | **$1.81** | $54 |
+| 1s (the premise in CLAUDE.md) | 86,400 | $5.44 | $163 |
+| 5s | 17,280 | $1.09 | $33 |
 
-**The VM is about 8% of the cost of running this**, if the token assumption
-holds. Either way the machine is not where the money is; the length of the run
-is.
+The machine is now under 6% of the bill. Cadence and run length are the only
+levers that matter.
 
 ### What a phase 2 run actually costs
 
 The exit criterion is "several days of clean tick logs", not a month. Five days
-of continuous shadow collection:
+at the configured 3s:
 
 ```
-infrastructure   5 × $0.44  =  $2.20
-model calls      5 × $5.44  = $27.20
+infrastructure   5 × $0.11  =  $0.55
+model calls      5 × $1.81  =  $9.07
                               -------
-                              ≈ $29
+                              ≈ $9.60
 ```
 
-Phase 1 is free of model calls entirely — `-mode observe` never calls TypeSafe,
-so an hour, or a day, of stream verification costs only the VM.
+For reference, the same five days at 1s in asia-northeast1 on an e2-small — the
+configuration this started from — would have been about $29.
+
+Phase 1 is free of model calls entirely: `-mode observe` never calls TypeSafe,
+so an hour, or a day, of stream verification costs only the VM. So does
+`cmd/preflight -dry-run`.
 
 ### Between runs
 
 Stop the VM. A stopped instance bills nothing for compute, and an ephemeral
-external IP is released when it stops, so the standing cost falls to the disk
-alone — $2.60/month for 20GB pd-balanced.
+external IP is released when it stops, so the standing cost falls to the disk —
+which is inside the free allowance, so effectively zero.
 
 ```bash
-gcloud compute instances stop jev-tick-lab --zone asia-northeast1-b
-gcloud compute instances start jev-tick-lab --zone asia-northeast1-b
+gcloud compute instances stop jev-tick-lab --zone us-west1-b
+gcloud compute instances start jev-tick-lab --zone us-west1-b
 ```
 
-The collector comes back on boot (`Restart=always` plus the unit being enabled),
-re-seeds the book from the first `depth_whole`, and carries on. It is a new run
-in every sense that matters, so it writes a new row to `runs-YYYY-MM-DD.jsonl`.
+The collector comes back on boot, re-seeds the book from the first
+`depth_whole`, and carries on. It is a new run in every sense that matters, so
+it writes a new row to `runs-YYYY-MM-DD.jsonl`.
+
+Note that stopped hours do not bank free-tier hours for a second VM later: the
+allowance is per month, not a balance.
 
 ### A budget you will actually notice
 

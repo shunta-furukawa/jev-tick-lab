@@ -15,7 +15,7 @@ set -eu
 
 : "${JEV_PROJECT:?set in /etc/jev-tick-lab/config}"
 : "${JEV_SECRET_ID:?set in /etc/jev-tick-lab/config}"
-: "${JEV_PAIR:?}" "${JEV_MODE:?}" "${JEV_MODEL:?}" "${JEV_LOG_DIR:?}"
+: "${JEV_PAIR:?}" "${JEV_MODE:?}" "${JEV_MODEL:?}" "${JEV_LOG_DIR:?}" "${JEV_TICK:?}"
 
 METADATA="http://metadata.google.internal/computeMetadata/v1"
 
@@ -38,4 +38,5 @@ exec /opt/jev-tick-lab/bot \
   -pair "$JEV_PAIR" \
   -mode "$JEV_MODE" \
   -model "$JEV_MODEL" \
+  -tick "$JEV_TICK" \
   -log-dir "$JEV_LOG_DIR"

@@ -172,6 +172,7 @@ resource "google_compute_instance" "bot" {
       mode       = var.mode
       secret_id  = google_secret_manager_secret.typesafe_api_key.secret_id
       log_bucket = google_storage_bucket.logs.name
+      tick       = var.tick
     })
   }
 

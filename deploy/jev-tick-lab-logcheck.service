@@ -12,9 +12,13 @@ EnvironmentFile=/etc/jev-tick-lab/config
 # what Cloud Logging alerts on. Exit 2 means it could not tell (no log file at
 # all), which is also not a healthy run.
 #
+# -tick is not optional: logcheck derives the expected record count from the
+# cadence, so a 3s bot checked against a 1s assumption reports every healthy
+# hour as a third of the records it wanted.
+#
 # -json so the ops agent forwards structured fields and a severity rather than
 # a wall of text.
-ExecStart=/opt/jev-tick-lab/logcheck -dir ${JEV_LOG_DIR} -window 1h -json
+ExecStart=/opt/jev-tick-lab/logcheck -dir ${JEV_LOG_DIR} -tick ${JEV_TICK} -window 1h -json
 
 StandardOutput=journal
 StandardError=journal

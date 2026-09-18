@@ -27,6 +27,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/shunta-furukawa/jev-tick-lab/internal/decide"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/jev"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/marketstate"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/stream"
@@ -36,6 +37,7 @@ func main() {
 	var (
 		pair        = flag.String("pair", "xrp_jpy", "bitbank pair to build the state from")
 		model       = flag.String("model", "jev-1.13.0", "the versioned model id to pin")
+		tick        = flag.Duration("tick", 3*time.Second, "the cadence the run will use, so the latency verdict is about your deployment")
 		warmup      = flag.Duration("warmup", 30*time.Second, "how long to wait for a usable market snapshot")
 		callTimeout = flag.Duration("call-timeout", 10*time.Second, "deadline for the one call; deliberately looser than the bot's 3s")
 		stateFile   = flag.String("state", "", "send this file as the state instead of connecting to bitbank")
@@ -48,13 +50,13 @@ func main() {
 	)
 	flag.Parse()
 
-	if err := run(*pair, *model, *warmup, *callTimeout, *stateFile, *showState, *pricePerM, *dryRun); err != nil {
+	if err := run(*pair, *model, *tick, *warmup, *callTimeout, *stateFile, *showState, *pricePerM, *dryRun); err != nil {
 		fmt.Fprintln(os.Stderr, "\npreflight FAILED:", err)
 		os.Exit(1)
 	}
 }
 
-func run(pair, model string, warmup, callTimeout time.Duration, stateFile string, showState bool, pricePerM float64, dryRun bool) error {
+func run(pair, model string, tick, warmup, callTimeout time.Duration, stateFile string, showState bool, pricePerM float64, dryRun bool) error {
 	apiKey := os.Getenv("TYPESAFE_API_KEY")
 	if apiKey == "" && !dryRun {
 		return fmt.Errorf("TYPESAFE_API_KEY is not set; this command exists to make a real call. Use -dry-run to check everything up to the call")
@@ -98,7 +100,7 @@ func run(pair, model string, warmup, callTimeout time.Duration, stateFile string
 	}
 
 	problems, notes := jev.Verify(questions, model, resp)
-	report(resp, questions, latency, pricePerM, notes)
+	report(resp, questions, latency, tick, pricePerM, notes)
 
 	if len(problems) > 0 {
 		fmt.Println("\nproblems:")
@@ -178,24 +180,33 @@ func buildState(ctx context.Context, pair string, warmup time.Duration, stateFil
 	}
 }
 
-func report(resp *jev.Response, questions map[string]jev.Question, latency time.Duration, pricePerM float64, notes []string) {
+func report(resp *jev.Response, questions map[string]jev.Question, latency, tick time.Duration, pricePerM float64, notes []string) {
 	fmt.Printf("\nmodel         %s answered\n", resp.Model)
 	fmt.Printf("latency       %s\n", latency.Round(time.Millisecond))
 	fmt.Printf("tokens        %d in, %d out\n", resp.Usage.InputTokens, resp.Usage.OutputTokens)
 
 	if resp.Usage.InputTokens > 0 {
 		perCall := float64(resp.Usage.InputTokens) * pricePerM / 1e6
-		fmt.Printf("cost          $%.6f per call -> $%.2f/day at 1/sec, $%.2f for a 5-day run\n",
-			perCall, perCall*86400, perCall*86400*5)
+		callsPerDay := 86400 / tick.Seconds()
+		fmt.Printf("cost          $%.6f per call -> $%.2f/day at %s, $%.2f for a 5-day run\n",
+			perCall, perCall*callsPerDay, tick, perCall*callsPerDay*5)
 	}
 
-	// The bot's default call timeout is 3s and a slow call skips its tick, so
-	// this number decides whether a 1s cadence is realistic at all.
+	// The measured latency has to clear three separate bars, and only one of
+	// them is obvious.
+	maxAge := decide.DefaultThresholds().MaxDecisionAge
 	switch {
 	case latency > 3*time.Second:
-		fmt.Printf("              WARNING: slower than the bot's 3s call timeout — every tick would be skipped\n")
-	case latency > time.Second:
-		fmt.Printf("              NOTE: slower than the 1s tick, so ticks will be skipped while a call is in flight\n")
+		fmt.Printf("              WARNING: slower than the bot's 3s call timeout — every tick would fail\n")
+	case latency > maxAge:
+		// The quiet one. decide gates any answer older than MaxDecisionAge, so
+		// a run like this collects answers and produces no signals at all —
+		// every record shows gate=decision_age.
+		fmt.Printf("              WARNING: slower than Thresholds.MaxDecisionAge (%s), so decide would gate\n"+
+			"                       EVERY answer as stale. Raise MaxDecisionAge, or accept a\n"+
+			"                       dataset in which no signal ever passes gate 0.\n", maxAge)
+	case latency > tick:
+		fmt.Printf("              NOTE: slower than the %s tick, so ticks will be skipped while a call is in flight\n", tick)
 	}
 
 	fmt.Println("\nanswers:")

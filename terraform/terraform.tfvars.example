@@ -2,11 +2,14 @@
 project_id = "your-gcp-project"
 
 # Defaults worth knowing about:
-# region       = "asia-northeast1"
-# zone         = "asia-northeast1-b"
-# machine_type = "e2-small"
+# region       = "us-west1"       # free-tier eligible, and same region as the model API
+# zone         = "us-west1-b"
+# machine_type = "e2-micro"       # the only type the free tier covers
+# disk_type    = "pd-standard"    # the only type the free tier covers
+# disk_gb      = 30               # exactly the free allowance
+# tick         = "3s"             # model calls are ~90% of the bill
 # pair         = "xrp_jpy"
-# model        = "jev-1.13.0"   # pinned, never an alias
+# model        = "jev-1.13.0"     # pinned, never an alias
 # mode         = "shadow"
 
 # Set this and you get two alerts: "the data went bad" and, more importantly,

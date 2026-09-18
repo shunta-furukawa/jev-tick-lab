@@ -15,7 +15,11 @@ analysis. A run that loses money but produces a clean calibration curve is a
 success. A run that makes money with no logged confidence data is a failure.
 
 Target market: bitbank (Japanese exchange), spot, JPY pairs.
-Language: Go. Deployment: single VM in `asia-northeast1`.
+Language: Go. Deployment: single always-on VM.
+
+**Two owner decisions override the obvious defaults for the initial experiment.
+Both are cost decisions and both are reversible.** See "Owner decisions" below
+before changing the region or the cadence.
 
 ---
 
@@ -121,10 +125,15 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 
 ### Key design decisions and why
 
-**Jev calls are asynchronous with at most one in flight.** A 1s tick against a
-~400ms model leaves headroom, but a slow call must skip the tick rather than
-queue. A queued answer describes a market that no longer exists. See
-`inFlight` in `cmd/bot/main.go`.
+**Jev calls are asynchronous with at most one in flight.** A slow call must skip
+its tick rather than queue, because a queued answer describes a market that no
+longer exists. See `inFlight` in `cmd/bot/main.go`.
+
+The headroom depends on a latency nobody here has measured. The `-tick` flag
+defaults to 1s, the initial experiment runs at 3s, and the model is assumed to
+answer in ~400ms. If it is slower than `Thresholds.MaxDecisionAge` (2s) the run
+collects answers and produces no signals at all — every record gated
+`decision_age`. `cmd/preflight` measures it and says so.
 
 **Decision freshness is bounded.** `Thresholds.MaxDecisionAge` (2s). Anything
 older is discarded rather than acted on.
@@ -302,6 +311,48 @@ None of it has been applied against a real project yet.
 
 ---
 
+## Owner decisions
+
+Recorded because they contradict what the rest of this document would otherwise
+imply, and because they should be revisited at a known point rather than
+forgotten.
+
+### Run in the US, not Tokyo — 2026-09-18
+
+`terraform/` defaults to **us-west1** (Oregon). CLAUDE.md's own advice is "keep
+the hop short", and this does the opposite for the exchange. Why anyway:
+
+- `e2-micro` is covered by the GCP Always Free tier in us-west1, us-central1 and
+  us-east1, and nowhere else. asia-northeast1 is not eligible. Compute and disk
+  become free; only the external IP is billed.
+- `api.typesafe.ai` resolves into AWS us-west-2, which is also Oregon. The model
+  call — which `MaxDecisionAge` gates every signal on — goes from roughly 100ms
+  round trip out of Tokyo to roughly 10ms. So this is not purely a downgrade: it
+  trades book freshness for model latency, and model latency is the one that can
+  silently produce a dataset with no signals in it.
+- The cost: the book arrives ~55ms later than it would from Tokyo. At a 3s
+  cadence that is under 2% of a tick.
+
+**Revisit before phase 4.** Simulated and real fills are about the round trip to
+bitbank, where 110ms is no longer a rounding error.
+
+### Evaluate every 3s, not every 1s — 2026-09-18
+
+The model calls are ~90% of the bill and scale linearly with the cadence, so 1s
+to 3s takes a five-day run from about $27 to about $9.
+
+This changes the dataset, not just the price. The premise at the top of this
+document is a once-per-second judgement; a 3s series is a coarser one. It is
+still the right shape for the question phase 2 and 3 actually ask — is the
+confidence calibrated at all — and the forward-fill horizons (10s/60s/300s) all
+still land on real records, though +10s resolves to the tick at +12s.
+
+Anything deriving an expected record count from the cadence has to be told:
+`deploy/run.sh` passes `-tick`, and the logcheck unit passes the same value. A
+3s bot checked against a 1s assumption reports every healthy hour as degraded.
+
+---
+
 ## Phases
 
 Do not skip ahead. Each phase gates the next.
@@ -319,49 +370,47 @@ answers the interesting question. Resist building the executor early.
 
 ---
 
-## Immediate TODO
+## Where this actually stands
 
-Done since the skeleton:
+The honest version, because several things in this repository look finished and
+are not. **Verified** means it was exercised against the real thing. **Assumed**
+means it typechecks, has tests against a fake, and has never met production.
 
-- ~~Verify the bitbank stream contract against live data~~ →
-  [docs/stream-verification.md](docs/stream-verification.md), and `cmd/dump` to
-  re-check it.
-- ~~`go.sum` / dependency fetch~~ → `gorilla/websocket` only, as expected.
-- ~~Sequence handling on the depth book~~ → buffer-and-replay, see above. It is
-  not gap detection; the ids are not consecutive.
-- ~~Unit tests for `internal/decide`~~ → every gate, table-driven, plus the
-  ordering property that brakes beat accelerators.
-- ~~Unit tests for `internal/marketstate`~~ → sequencing, bar continuity,
-  indicator maths, and a golden test on the state text.
-- ~~Forward-fill tool~~ → `cmd/fill`.
-- ~~Calibration analysis~~ → `cmd/calib`.
+| | |
+|---|---|
+| bitbank stream contract | ✅ verified live, frames captured ([record](docs/stream-verification.md)) |
+| depth sequencing | ✅ unit tested against bitbank's own worked example; 65 min live with zero unsynced ticks |
+| indicator maths, state text format | ✅ unit tested, golden test on the rendering |
+| no gaps over an hour | ✅ 3,898 ticks, zero gaps, zero reconnects ([record](docs/phase1-run.md)) |
+| state text read against live data for an hour | ⚠️ minutes only — half of the phase 1 criterion |
+| systemd units | ⚠️ `systemd-analyze verify` passes; never started on a real VM |
+| **TypeSafe accepts this question set** | ❌ **never called.** `jev.Validate` is local only |
+| **model latency** | ❌ assumed ~400ms. If it exceeds `MaxDecisionAge` (2s), every signal is gated stale |
+| **input tokens, so every cost figure** | ❌ assumed 1,500/call. Payload measures 3,863 bytes |
+| `decide` against real answers | ❌ fixtures only |
+| `cmd/fill`, `cmd/calib` | ❌ synthetic input only |
+| Terraform | ❌ never applied to a project |
+| `deploy/deploy.sh` | ❌ syntax checked only |
 
-- ~~Somewhere to actually run it~~ → `terraform/`, `deploy/`, and
-  `cmd/logcheck` for the hourly verdict. Not yet applied to a real project.
+The bolded rows are all settled by one `cmd/preflight` call, which is why it
+comes before the long run.
 
-- Run phase 1 for an hour → [docs/phase1-run.md](docs/phase1-run.md). The
-  no-gaps half is met: zero gaps, zero reconnects, 2s warmup over 65 minutes. It
-  also confirmed the sparse-trade problem at scale — **28.4% of ticks had seen
-  no print in 30 seconds**, which is what the continuous bar series exists for.
-  The "renders correctly" half is not: that run logged snapshot fields rather
-  than rendered text, so the state text has only been read by eye for minutes.
+## Next, in order
 
-Next, in order:
-
-1. **Finish phase 1: an hour of `-print-state` actually read.** Cheap, needs no
-   API key, and it is the half of the criterion still outstanding.
-2. **Pre-flight the TypeSafe contract before committing to a long run.**
-   `cmd/preflight` makes exactly one real call. Nothing in this repository has
-   ever talked to the real API — the client is tested against fakes, and
-   `jev.Validate` only checks the question set's shape locally. A 422 on the
-   first tick of a multi-day run would produce days of nothing but error
-   records.
-3. **Run phase 2 for several days.** This is the whole point. It needs no
-   execution code. Pin `-model` to a version and leave it alone for the run.
-4. **Then, and only then, phase 3.** `cmd/fill` and `cmd/calib` are written but
-   have only ever seen synthetic input. Expect to find that some question has no
-   usable ground truth and needs rethinking — that is the phase 3 deliverable.
-5. **`internal/exec/paper.go`** — phase 4. Do not start it early.
+1. **Finish phase 1.** An hour of `-mode observe -print-state`, actually read.
+   No API key, no cost, and it is the outstanding half of the criterion.
+2. **`terraform apply`, then seed the secret.** See
+   [docs/operations.md](docs/operations.md). Nothing here has been applied, so
+   budget for fixing something on the first attempt.
+3. **`cmd/preflight`.** One real call. It settles the API contract, the latency
+   and the token cost in one shot, and its exit code says whether to proceed.
+4. **Phase 2 for several days.** The whole point, and it needs no execution
+   code. Pin `-model` and leave it alone. Watch the hourly logcheck verdict.
+5. **Phase 3.** Expect to find that some question has no usable ground truth.
+   Start with `book_pressure`: phase 1 measured the book as bid-heavy 70% of the
+   time, so its base rate may be structural rather than informative.
+6. **`internal/exec/paper.go`** — phase 4, and the point at which the region
+   decision above needs revisiting. Do not start it early.
 
 ## Things deliberately not built
 

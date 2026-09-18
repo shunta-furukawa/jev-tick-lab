@@ -28,6 +28,7 @@ cat >"/etc/$NAME/config" <<CONFIG
 JEV_PAIR=${pair}
 JEV_MODEL=${model}
 JEV_MODE=${mode}
+JEV_TICK=${tick}
 JEV_LOG_DIR=$LOG_DIR
 JEV_PROJECT=${project_id}
 JEV_SECRET_ID=${secret_id}

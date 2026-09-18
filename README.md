@@ -30,7 +30,7 @@ export TYPESAFE_API_KEY=...
 go run ./cmd/preflight -pair xrp_jpy -model jev-1.13.0
 
 # Phase 2 — Jev evaluation and full logging. Still no trading.
-go run ./cmd/bot -pair xrp_jpy -mode shadow -model jev-1.13.0 -log-dir ./data
+go run ./cmd/bot -pair xrp_jpy -mode shadow -model jev-1.13.0 -tick 3s -log-dir ./data
 ```
 
 `cmd/preflight` exists because nothing else here has ever talked to the real
@@ -85,12 +85,15 @@ continuous collection is **$5.44/day**, and eight hours a day is under $2.
 
 That token count is an assumption — `cmd/preflight` prints the real one.
 
-The VM it runs on is **$0.44/day** — an e2-micro in `asia-northeast1` with a
-20GB disk and an external IP, at September 2026 list prices. That is about 8% of
-the total: the length of the run is what costs money, not the machine.
+The initial experiment runs at a **3s** cadence rather than 1s, which is $1.81/day.
 
-A five-day phase 2 collection is therefore around **$29** all in. Phase 1 makes
-no model calls at all, so `-mode observe` costs only the VM.
+The VM it runs on is **$0.11/day**: an `e2-micro` with a 30GB standard disk in
+`us-west1`, a configuration chosen to sit inside the GCP Always Free tier, so
+only the external IP and a little egress are billed. That is under 6% of the
+total — cadence and run length are the only levers that matter.
+
+A five-day phase 2 collection is therefore around **$9.60** all in. Phase 1
+makes no model calls at all, so `-mode observe` costs only the VM.
 
 Full breakdown, including how to stop paying between runs, in
 [docs/operations.md](docs/operations.md#cost).
@@ -112,9 +115,11 @@ printf %s "$TYPESAFE_API_KEY" | \
 ./deploy/deploy.sh YOUR_PROJECT
 ```
 
-`terraform/` builds an e2-small in `asia-northeast1` (bitbank is domestic; keep
-the hop short) inside a VPC whose only ingress is SSH through IAP, plus the log
-bucket, a BigQuery dataset and an empty Secret Manager container.
+`terraform/` builds a free-tier `e2-micro` in `us-west1` inside a VPC whose only
+ingress is SSH through IAP, plus the log bucket, a BigQuery dataset and an empty
+Secret Manager container. Oregon rather than Tokyo is a deliberate cost decision
+— and it also puts the VM in the same region as the model API. The reasoning,
+and when to revisit it, is in CLAUDE.md under "Owner decisions".
 `deploy/deploy.sh` puts the binaries and the systemd units on it — and refuses
 to ship a build that does not pass `make check`.
 

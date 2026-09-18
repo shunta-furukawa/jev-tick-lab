@@ -13,7 +13,7 @@ set -euo pipefail
 
 PROJECT="${1:?usage: deploy.sh PROJECT [INSTANCE] [ZONE]}"
 INSTANCE="${2:-jev-tick-lab}"
-ZONE="${3:-asia-northeast1-b}"
+ZONE="${3:-us-west1-b}"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE="$(mktemp -d)"

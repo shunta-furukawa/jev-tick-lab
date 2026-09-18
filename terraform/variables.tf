@@ -4,14 +4,30 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "bitbank is a domestic Japanese exchange; keep the network hop short."
+  description = <<-EOT
+    us-west1 (Oregon) for the initial experiment, decided by the owner on cost
+    grounds — see the region note in CLAUDE.md.
+
+    Two reasons it is us-west1 specifically and not us-central1:
+
+      1. It is one of the three regions (with us-central1 and us-east1) where an
+         e2-micro is covered by the Always Free tier. asia-northeast1 is not.
+      2. api.typesafe.ai resolves into AWS us-west-2, which is also Oregon. So
+         the model call — the thing Thresholds.MaxDecisionAge gates every signal
+         on — goes from a ~100ms round trip out of Tokyo to roughly 10ms.
+
+    What it costs: bitbank is in Tokyo, so the book arrives about 55ms later
+    than it would in asia-northeast1. At a 3s cadence that is under 2% of a
+    tick, which is fine for collecting a shadow dataset and is not fine for
+    placing orders. Move back to asia-northeast1 before phase 4.
+  EOT
   type        = string
-  default     = "asia-northeast1"
+  default     = "us-west1"
 }
 
 variable "zone" {
   type    = string
-  default = "asia-northeast1-b"
+  default = "us-west1-b"
 }
 
 variable "name" {
@@ -22,15 +38,17 @@ variable "name" {
 
 variable "machine_type" {
   description = <<-EOT
-    e2-micro is the default because the workload really is tiny: one WebSocket,
-    a few hundred book levels, and one HTTPS call a second. In asia-northeast1
-    it is $7.84/month against $15.69 for e2-small (Sep 2026 list; E2 gets no
-    sustained-use discount, so the sticker price is the price).
+    e2-micro, and specifically e2-micro: it is the only machine type the Always
+    Free tier covers, and only in us-central1, us-west1 and us-east1. One
+    always-on instance fits inside the monthly allowance exactly.
 
-    The caveat is e2-micro's 0.25 vCPU baseline, which throttles under sustained
-    load. This workload is bursty, not sustained, so it should be fine — and if
-    it is not, you will know: throttling shows up in logcheck as a record rate
-    below the floor. Move to e2-small then, not before.
+    The caveat is its 0.25 vCPU baseline, which throttles under sustained load.
+    This workload is bursty — one WebSocket, a few hundred book levels, one
+    HTTPS call every few seconds — and if it does throttle it is not a silent
+    failure: it shows up in logcheck as a record rate below the floor.
+
+    Changing this forfeits the free tier. e2-small is about $12/month in
+    us-west1.
   EOT
   type        = string
   default     = "e2-micro"
@@ -38,24 +56,28 @@ variable "machine_type" {
 
 variable "disk_type" {
   description = <<-EOT
-    pd-balanced at $0.13/GB/month, against $0.052 for pd-standard — $1.56 a
-    month on a 20GB disk. Not worth the sluggish boot and apt runs of an
-    HDD-backed disk, but pd-standard is there if every yen counts. The tick
-    logger writes about 3KB a second, which neither type notices.
+    pd-standard, because the free tier's 30 GB-months covers "standard
+    persistent disk" only. pd-balanced would be about $0.10/GB/month, so around
+    $3/month for the same 30GB.
+
+    The tick logger appends a few KB every few seconds, which an HDD-backed disk
+    does not notice. Boot and apt are slower; that is the trade.
   EOT
   type        = string
-  default     = "pd-balanced"
+  default     = "pd-standard"
 }
 
 variable "disk_gb" {
   description = <<-EOT
-    A day of ticks is roughly 90MB: ~29,000 records carrying the state text they
-    were evaluated against. 20GB holds most of a year. Nothing prunes the local
-    copy — the shipper copies to GCS and never deletes — so this is the real
-    bound on an unattended run.
+    30GB is exactly the Always Free allowance for standard persistent disk.
+    Going over forfeits it for the excess.
+
+    At a 3s cadence a day of ticks is roughly 30MB — ~28,800 records carrying
+    the state text they were evaluated against — so 30GB holds years. Nothing
+    prunes the local copy; the shipper copies to GCS and never deletes.
   EOT
   type        = number
-  default     = 20
+  default     = 30
 }
 
 variable "pair" {
@@ -77,6 +99,24 @@ variable "model" {
     condition     = can(regex("^jev-[0-9]+\\.[0-9]+\\.[0-9]+$", var.model))
     error_message = "Pin a versioned model id such as jev-1.13.0, not an alias."
   }
+}
+
+variable "tick" {
+  description = <<-EOT
+    Evaluation cadence. 3s for the initial experiment, decided by the owner on
+    cost grounds: the model calls are ~90% of the bill and they scale linearly
+    with this, so 1s -> 3s takes a five-day run from about $27 to about $9.
+
+    It does change the dataset. The premise in CLAUDE.md is a once-per-second
+    judgement, and a 3s series is a coarser one — fine for establishing whether
+    confidence is calibrated at all, which is what phase 2 and 3 are for.
+
+    Two things this has to stay consistent with: logcheck derives the expected
+    record count from it, and Thresholds.MaxDecisionAge (2s) must still exceed
+    the real call latency, which cmd/preflight measures.
+  EOT
+  type        = string
+  default     = "3s"
 }
 
 variable "mode" {
