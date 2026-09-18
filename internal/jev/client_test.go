@@ -3,6 +3,7 @@ package jev
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -225,4 +226,67 @@ func errorsAs(err error, target **APIError) bool {
 		err = u.Unwrap()
 	}
 	return false
+}
+
+// The error string from a failed call is written into the JSONL tick record,
+// which is shipped to GCS and loaded into BigQuery. If a credential ever
+// reached it, the key would sit in an archive indefinitely.
+func TestAFailedCallCannotLeakTheCredentialIntoAnError(t *testing.T) {
+	t.Parallel()
+	const key = "sk-live-do-not-log-this-0123456789"
+
+	// A server that echoes the credential back in its error body. Nothing says
+	// TypeSafe does this; the point is that the record is permanent if it ever
+	// happens.
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, `{"error":"invalid key","received":%q}`, r.Header.Get("Authorization"))
+	})
+	c.APIKey = key
+
+	_, err := c.Ask(context.Background(), "state", QuestionSet())
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), key) {
+		t.Fatalf("the credential survived into the error string: %s", err)
+	}
+	if !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Errorf("expected the redaction marker, got: %s", err)
+	}
+	// The useful part of a 401 or 422 body must survive redaction.
+	if !strings.Contains(err.Error(), "invalid key") {
+		t.Errorf("redaction ate the diagnostic: %s", err)
+	}
+}
+
+func TestATransportErrorIsRedactedToo(t *testing.T) {
+	t.Parallel()
+	const key = "sk-live-secret"
+
+	c := New(key, "jev-1.13.0")
+	// A URL containing the key is not how this client works, but it is how a
+	// future one might, and the redaction should not care.
+	c.Endpoint = "http://127.0.0.1:1/" + key
+	c.MaxRetries = 0
+
+	_, err := c.Ask(context.Background(), "state", QuestionSet())
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), key) {
+		t.Fatalf("the credential survived into a transport error: %s", err)
+	}
+}
+
+func TestPrintingTheClientDoesNotPrintTheKey(t *testing.T) {
+	t.Parallel()
+	const key = "sk-live-secret"
+	c := New(key, "jev-1.13.0")
+
+	for _, format := range []string{"%v", "%+v", "%s"} {
+		if got := fmt.Sprintf(format, c); strings.Contains(got, key) {
+			t.Errorf("%s printed the key: %s", format, got)
+		}
+	}
 }

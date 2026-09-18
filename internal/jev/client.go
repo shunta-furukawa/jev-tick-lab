@@ -21,6 +21,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -76,6 +77,8 @@ type Response struct {
 	Usage   Usage             `json:"usage"`
 }
 
+// Client holds the credential, so it is also the only place that can reliably
+// keep it out of anything it returns. See redact.
 type Client struct {
 	APIKey     string
 	Model      string // pin a versioned id in production, e.g. "jev-1.13.0"
@@ -92,6 +95,28 @@ func New(apiKey, model string) *Client {
 		MaxRetries: 2, // a stale answer is worthless; fail fast and skip the tick
 		Endpoint:   DefaultEndpoint,
 	}
+}
+
+// String keeps the credential out of a `%v` or `%+v` of the client. Logging a
+// whole client is not something this code does, but the cost of making it safe
+// is one method.
+func (c *Client) String() string {
+	return fmt.Sprintf("jev.Client{Model: %q, Endpoint: %q, APIKey: [%d chars, redacted]}",
+		c.Model, c.Endpoint, len(c.APIKey))
+}
+
+// redact removes the credential from a string.
+//
+// The key is only ever sent as a header, so it should never come back. But an
+// error string from a failed call is written into the JSONL tick record, which
+// is shipped to GCS and loaded into BigQuery — so if a server ever did echo a
+// credential into an error body, the result would be the key sitting in an
+// archive forever. The probability is low; the blast radius is permanent.
+func (c *Client) redact(s string) string {
+	if c.APIKey == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, c.APIKey, "[REDACTED]")
 }
 
 type APIError struct {
@@ -154,7 +179,9 @@ func (c *Client) Ask(ctx context.Context, state string, questions map[string]Que
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
-			lastErr = err
+			// A transport error carries the URL rather than the header, so this
+			// is belt-and-braces. It is also the cheap kind.
+			lastErr = fmt.Errorf("%s", c.redact(err.Error()))
 			continue
 		}
 
@@ -164,7 +191,7 @@ func (c *Client) Ask(ctx context.Context, state string, questions map[string]Que
 		if resp.StatusCode != http.StatusOK {
 			apiErr := &APIError{
 				Status:     resp.StatusCode,
-				Body:       string(raw),
+				Body:       c.redact(string(raw)),
 				RetryAfter: retryAfter(resp.Header.Get("Retry-After")),
 			}
 			if !apiErr.retryable() {

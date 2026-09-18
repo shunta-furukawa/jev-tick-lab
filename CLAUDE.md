@@ -307,6 +307,19 @@ are load-bearing:
 - **The bucket and dataset survive `terraform destroy`.** The tick logs are the
   deliverable; `force_destroy` stays false.
 
+Credentials have their own page: [docs/secrets.md](docs/secrets.md) — the whole
+inventory is one secret now and one more at phase 5. Two things there are worth
+knowing before you touch this area:
+
+- **The only field in a tick record carrying text this code did not construct is
+  `error`.** `internal/jev` redacts the credential from every error it returns,
+  transport errors included, and `Client` has a `String` method so printing one
+  cannot print the key. Records are shipped to GCS and loaded into BigQuery, so
+  a leak there would be permanent.
+- **The bitbank key at phase 5 must never carry withdrawal permission.** bitbank
+  grants 参照 / 取引 / 出金 separately. Nothing in this experiment moves money
+  off the exchange.
+
 None of it has been applied against a real project yet.
 
 ---

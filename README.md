@@ -161,7 +161,7 @@ cmd/logcheck/         hourly health verdict, exit code is the interface
 cmd/preflight/        one real API call, fully checked, before a long run
 terraform/            the VM and its surroundings
 deploy/               systemd units, secret fetch, log shipping, deploy script
-docs/                 stream verification record, operations runbook
+docs/                 stream verification, operations runbook, secrets inventory
 ```
 
 ## Development

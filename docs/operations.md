@@ -143,6 +143,11 @@ thrown away. `SKIP_CHECK=1` exists for emergencies.
 
 ## Where the key lives
 
+> The full credential inventory, rotation procedure, and the phase 5 bitbank
+> permissions are in [secrets.md](secrets.md). What follows is how the one
+> secret that exists today reaches the process.
+
+
 Worth being explicit, because the first version of this got it wrong.
 
 The unit reads `/etc/jev-tick-lab/config`, which holds the pair, the model, the
