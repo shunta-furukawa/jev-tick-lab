@@ -11,7 +11,15 @@ network path is not the one a deployed run would take. What it exercises is the
 stream client, the book maintenance and the derived numbers, which is what the
 criterion is about.
 
-## Result: passed
+## Result: the no-gaps half, yes. The renders-correctly half, not yet.
+
+The criterion has two parts and this run only settles one of them. Recorded
+plainly because the phase table briefly claimed otherwise: the exit criterion
+was paraphrased as "an hour of live running with no gaps", which quietly dropped
+"state text renders correctly", and then marked as passed. The original wording
+is restored.
+
+### No gaps: met
 
 | | |
 |---|---|
@@ -24,6 +32,21 @@ criterion is about.
 
 One `not ready` warning, one second after start, before the rooms were joined —
 which is the warmup path doing exactly what it should.
+
+### Renders correctly: not met
+
+This run logged snapshot fields rather than rendered text, to keep the journal
+machine-readable. What exists instead: `TestRenderGolden` pins the format, the
+text was read against live data by eye for a few minutes, and none of the
+underlying fields went nonsensical over the hour (no tick without a price, all
+spreads and imbalances in range, `circuit_break` NONE throughout).
+
+That is good evidence and it is not the criterion. Finishing it costs an hour
+and no API key:
+
+```bash
+go run ./cmd/bot -pair xrp_jpy -mode observe -print-state
+```
 
 ## What the hour showed about the market
 

@@ -117,6 +117,7 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `cmd/fill` | Forward-fill: joins each logged tick to the price 10s/60s/300s later |
 | `cmd/calib` | The calibration report: stated probability against realised frequency |
 | `cmd/logcheck` | Hourly health verdict on the collection. Exit 0 healthy, 1 degraded, 2 could not tell |
+| `cmd/preflight` | One real call to TypeSafe, then checks the whole response. Run it before any long collection. `-dry-run` needs no key |
 
 ### Key design decisions and why
 
@@ -209,6 +210,16 @@ retry 401/422.
 Rate limits at time of writing: **1,200 req/min, 250,000 tokens/sec**.
 A 1s cadence uses 60 rpm. TypeSafe warns these limits move without notice.
 
+**How input tokens are billed for a batch is not known.** The request measures
+3,863 bytes — 2,537 of question definitions and 1,250 of state text — which is
+roughly 860–1,100 tokens by a bytes-per-token estimate. But questions are
+evaluated "in parallel and in isolation", and if that means the state is
+re-tokenised per question, the billed figure is several times higher. The
+vendor's own claim that a 13-question batch is 12.2x cheaper than asking one at
+a time argues against that. Nobody here has seen a real `usage` field yet:
+`cmd/preflight` prints it, and every cost figure in this repository is an
+assumption until it has been run.
+
 Docs: <https://docs.typesafe.ai> — the full page index is at
 <https://docs.typesafe.ai/llms.txt>. Relevant reading: `/primitives`,
 `/confidence`, `/patterns/confidence-routing`, `/patterns/composite-scoring`,
@@ -297,7 +308,7 @@ Do not skip ahead. Each phase gates the next.
 
 | Phase | `-mode` | State | Exit criteria |
 |---|---|---|---|
-| 1 | `observe` | ✅ **passed** — 65 min live, 3,898 ticks, zero gaps, zero reconnects ([record](docs/phase1-run.md)) | An hour of live running with no gaps |
+| 1 | `observe` | 🔨 **half met** — 65 min live, 3,898 ticks, zero gaps, zero reconnects; the rendered text was only eyeballed for minutes ([record](docs/phase1-run.md)) | State text renders correctly against live data for an hour with no gaps |
 | 2 | `shadow` | 🔨 code complete, not yet run for real | Several days of clean tick logs, no trading |
 | 3 | — | 🔨 tooling built (`cmd/fill`, `cmd/calib`), no real data yet | Calibration analysis run; question set revised on the evidence |
 | 4 | `paper` | ⬜ not started, `-mode paper` exits with an error | Fill simulator with realistic maker/taker and queue assumptions |
@@ -328,19 +339,29 @@ Done since the skeleton:
 - ~~Somewhere to actually run it~~ → `terraform/`, `deploy/`, and
   `cmd/logcheck` for the hourly verdict. Not yet applied to a real project.
 
-- ~~Run phase 1 for an hour~~ → [docs/phase1-run.md](docs/phase1-run.md). Zero
-  gaps, zero reconnects, 2s warmup. It also confirmed the sparse-trade problem
-  at scale: **28.4% of ticks had seen no print in 30 seconds**, which is what
-  the continuous bar series exists for.
+- Run phase 1 for an hour → [docs/phase1-run.md](docs/phase1-run.md). The
+  no-gaps half is met: zero gaps, zero reconnects, 2s warmup over 65 minutes. It
+  also confirmed the sparse-trade problem at scale — **28.4% of ticks had seen
+  no print in 30 seconds**, which is what the continuous bar series exists for.
+  The "renders correctly" half is not: that run logged snapshot fields rather
+  than rendered text, so the state text has only been read by eye for minutes.
 
 Next, in order:
 
-1. **Run phase 2 for several days.** This is the whole point. It needs no
+1. **Finish phase 1: an hour of `-print-state` actually read.** Cheap, needs no
+   API key, and it is the half of the criterion still outstanding.
+2. **Pre-flight the TypeSafe contract before committing to a long run.**
+   `cmd/preflight` makes exactly one real call. Nothing in this repository has
+   ever talked to the real API — the client is tested against fakes, and
+   `jev.Validate` only checks the question set's shape locally. A 422 on the
+   first tick of a multi-day run would produce days of nothing but error
+   records.
+3. **Run phase 2 for several days.** This is the whole point. It needs no
    execution code. Pin `-model` to a version and leave it alone for the run.
-3. **Then, and only then, phase 3.** `cmd/fill` and `cmd/calib` are written but
+4. **Then, and only then, phase 3.** `cmd/fill` and `cmd/calib` are written but
    have only ever seen synthetic input. Expect to find that some question has no
    usable ground truth and needs rethinking — that is the phase 3 deliverable.
-4. **`internal/exec/paper.go`** — phase 4. Do not start it early.
+5. **`internal/exec/paper.go`** — phase 4. Do not start it early.
 
 ## Things deliberately not built
 

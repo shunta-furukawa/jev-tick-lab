@@ -25,10 +25,19 @@ go mod download
 # Phase 1 — stream and state only, no model calls, no API key needed.
 go run ./cmd/bot -pair xrp_jpy -mode observe -print-state
 
-# Phase 2 — Jev evaluation and full logging. Still no trading.
+# Before any long run: one real call, checked end to end.
 export TYPESAFE_API_KEY=...
+go run ./cmd/preflight -pair xrp_jpy -model jev-1.13.0
+
+# Phase 2 — Jev evaluation and full logging. Still no trading.
 go run ./cmd/bot -pair xrp_jpy -mode shadow -model jev-1.13.0 -log-dir ./data
 ```
+
+`cmd/preflight` exists because nothing else here has ever talked to the real
+API — the client is tested against a fake, and `jev.Validate` only checks the
+question set locally. A 422 on the first tick of a multi-day run would produce
+days of records containing nothing but an error string. One call settles it, and
+prints the measured tokens and latency that every cost figure below assumes.
 
 Records land in `./data/ticks-YYYY-MM-DD.jsonl`, one JSON object per tick, plus
 one row per process start in `./data/runs-YYYY-MM-DD.jsonl` holding the
@@ -73,6 +82,8 @@ way — see [docs/stream-verification.md](docs/stream-verification.md).
 At roughly 1,500 input tokens per call and $0.042 per million input tokens, one
 second of evaluation costs about $0.000063. Output tokens are not billed. So
 continuous collection is **$5.44/day**, and eight hours a day is under $2.
+
+That token count is an assumption — `cmd/preflight` prints the real one.
 
 The VM it runs on is **$0.44/day** — an e2-micro in `asia-northeast1` with a
 20GB disk and an external IP, at September 2026 list prices. That is about 8% of
@@ -142,6 +153,7 @@ internal/calib/       reliability bins, Brier, ECE
 internal/health/      is the collection still producing usable data?
 internal/exec/        fill simulation (phase 4, not implemented)
 cmd/logcheck/         hourly health verdict, exit code is the interface
+cmd/preflight/        one real API call, fully checked, before a long run
 terraform/            the VM and its surroundings
 deploy/               systemd units, secret fetch, log shipping, deploy script
 docs/                 stream verification record, operations runbook

@@ -90,7 +90,32 @@ printf %s "$TYPESAFE_API_KEY" | \
 
 `printf %s` rather than `echo`, so no trailing newline ends up in the key.
 
-### 4. Deploy
+### 4. Pre-flight the API
+
+**Do this before any collection longer than a few minutes.** Nothing in this
+repository had ever talked to the real TypeSafe API: `internal/jev` is tested
+against a local fake, and `jev.Validate` only checks the question set's shape
+without sending it.
+
+```bash
+export TYPESAFE_API_KEY=...
+go run ./cmd/preflight -pair xrp_jpy -model jev-1.13.0
+```
+
+One call, about $0.00006. It connects to bitbank, renders a real state, sends it
+once, and then checks the response the way no local test can: that the API
+accepts this question set, that every question came back, that the answer shapes
+match the documentation, that noul answers carry no confidence (rule 4), and
+that the model which answered is the one that was pinned (rule 5).
+
+It also prints the **measured** token count and latency. Until it has run, every
+cost figure below is an assumption, and so is the claim that a 1s cadence fits
+inside the 3s call timeout.
+
+Exit 1 means do not start the run yet. `-dry-run` does everything except the
+call and needs no key.
+
+### 5. Deploy
 
 ```bash
 ./deploy/deploy.sh YOUR_PROJECT
@@ -252,7 +277,13 @@ instead of $2.60 for the same 20GB.
 
 ### The model calls, which are the actual bill
 
-Using this repository's own figures — ~1,500 input tokens per call at $0.042 per
+**These are assumptions until `cmd/preflight` has run.** The request measures
+3,863 bytes, which a bytes-per-token estimate puts at 860–1,100 tokens against
+the repository's assumed 1,500 — except that batched questions are evaluated in
+isolation, and if the state is re-tokenised per question the real figure is
+several times higher, not lower. One preflight call settles it.
+
+Using the repository's own figures — ~1,500 input tokens per call at $0.042 per
 million, output not billed:
 
 | cadence | per day | per month |
@@ -261,8 +292,9 @@ million, output not billed:
 | 1 call/sec, 8h | $1.81 | $54 |
 | 1 call/2sec, 24h | $2.72 | $82 |
 
-**The VM is about 8% of the cost of running this.** Optimising the machine type
-is not where the money is; the length of the run is.
+**The VM is about 8% of the cost of running this**, if the token assumption
+holds. Either way the machine is not where the money is; the length of the run
+is.
 
 ### What a phase 2 run actually costs
 

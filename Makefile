@@ -1,4 +1,4 @@
-.PHONY: build build-linux build-all run-observe run-shadow dump logcheck check test race vet fmt fmt-check tidy clean deploy
+.PHONY: build build-linux build-all run-observe run-shadow dump logcheck preflight preflight-dry check test race vet fmt fmt-check tidy clean deploy
 
 build:
 	go build -o bin/bot ./cmd/bot
@@ -22,6 +22,14 @@ dump:
 # Is the collection still producing a usable dataset?
 logcheck:
 	go run ./cmd/logcheck -dir ./data -window 1h
+
+# One real API call, checked end to end. Run before any long collection.
+preflight:
+	go run ./cmd/preflight -pair xrp_jpy -model jev-1.13.0
+
+# Everything preflight does except the call; needs no API key.
+preflight-dry:
+	go run ./cmd/preflight -pair xrp_jpy -dry-run
 
 # Ships binaries and units to the provisioned VM. See docs/operations.md.
 deploy:
