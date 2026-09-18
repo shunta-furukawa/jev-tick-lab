@@ -174,7 +174,13 @@ func printReport(rep calib.Report) {
 
 	fmt.Printf("usable observations %d of %d\n", rep.Usable, rep.Total)
 	for _, reason := range calib.Tally(rep.Skipped).Sorted() {
-		fmt.Printf("  skipped: %-28s %d\n", reason, rep.Skipped[reason])
+		fmt.Printf("  skipped: %-34s %d\n", reason, rep.Skipped[reason])
+	}
+	if n := rep.Skipped["wait is unscoreable with -band-bps 0"]; n > 0 {
+		fmt.Printf("\n  Most of what the model says is \"wait\", and whether waiting was right is a\n" +
+			"  statement about a band: it was right if the market did not move enough to be\n" +
+			"  worth trading. Re-run with -band-bps to include them — 24 is an all-taker\n" +
+			"  round trip on a JPY alt, which is the economically meaningful threshold.\n")
 	}
 	if rep.Usable == 0 {
 		fmt.Println("\nnothing to report. Has the log been through cmd/fill?")

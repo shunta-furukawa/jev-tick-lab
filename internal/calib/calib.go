@@ -145,6 +145,9 @@ func observe(rec obs.Record, opt Options) (Observation, string) {
 		}
 		correct, ok := actionWasRight(ans.Choice, retBps, opt.BandBps)
 		if !ok {
+			if ans.Choice == jev.ActionWait {
+				return Observation{}, "wait is unscoreable with -band-bps 0"
+			}
 			// take_profit and cut_loss depend on a position that shadow mode
 			// never has; scoring them against price alone would be meaningless.
 			return Observation{}, "action has no price-derived truth"
@@ -174,15 +177,30 @@ func observe(rec obs.Record, opt Options) (Observation, string) {
 }
 
 // actionWasRight scores a directional call against the realised move. ok is
-// false for the exit actions, whose correctness is not a function of price.
+// false when the call has no price-derived truth at all.
 func actionWasRight(choice string, retBps, bandBps float64) (correct, ok bool) {
 	switch choice {
 	case jev.ActionBuy:
 		return retBps > bandBps, true
 	case jev.ActionSell:
 		return retBps < -bandBps, true
+
 	case jev.ActionWait:
+		// "Waiting was right" means the market did not move enough to be worth
+		// trading, which is a statement about a band. With no band it reduces
+		// to |return| <= 0 — the price unchanged to floating-point equality
+		// after sixty seconds — which is never true.
+		//
+		// Scored that way, every high-confidence wait counts as wrong, and
+		// since wait is most of what the model says, the reliability table
+		// fills with false overconfidence. The first real dataset showed a top
+		// bucket of 114 observations with a realised rate of exactly 0.000,
+		// which is what sent us looking.
+		if bandBps <= 0 {
+			return false, false
+		}
 		return math.Abs(retBps) <= bandBps, true
+
 	default:
 		return false, false
 	}

@@ -135,14 +135,20 @@ func TestActionOutcomeUsesTheBand(t *testing.T) {
 		t.Errorf("base rate = %v, want 0.5: one right call and one wrong one", rep.BaseRate)
 	}
 
-	// The same 10bps move with no band: the buy was right, waiting was wrong.
+	// The same 10bps move with no band: the buy was right, and the wait is not
+	// wrong — it is unanswerable, because "waiting was right" only means
+	// anything relative to a band. Scoring it as wrong is what produced a
+	// reliability table full of false overconfidence on the first real dataset.
 	opts.BandBps = 0
 	rep, err = Build([]obs.Record{record(0, buy(0.9), 10), record(1, wait, 10)}, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.BaseRate != 0.5 {
-		t.Errorf("base rate = %v, want 0.5 with the verdicts swapped", rep.BaseRate)
+	if rep.Usable != 1 {
+		t.Fatalf("usable = %d, want 1: the buy is scoreable, the wait is not", rep.Usable)
+	}
+	if rep.BaseRate != 1 {
+		t.Errorf("base rate = %v, want 1: the only scoreable call, the buy, was right", rep.BaseRate)
 	}
 }
 
@@ -311,5 +317,47 @@ func TestTallySortsByCountThenName(t *testing.T) {
 	got := fmt.Sprint(tally.Sorted())
 	if want := "[wait anomaly spread]"; got != want {
 		t.Errorf("Sorted() = %s, want %s", got, want)
+	}
+}
+
+// The first real dataset produced a top bucket of 114 observations with a
+// realised rate of exactly 0.000, which is not a thing a model does. It was
+// this: with no band, "waiting was right" reduced to the price being unchanged
+// to floating-point equality after sixty seconds, so every high-confidence wait
+// — most of what the model says — counted as wrong.
+func TestWaitIsNotScoredWrongWhenItCannotBeScoredAtAll(t *testing.T) {
+	t.Parallel()
+	wait := map[string]jev.Answer{jev.QAction: {
+		Type: "choice", Choice: jev.ActionWait, Confidence: 0.96,
+		Probabilities: map[string]float64{jev.ActionWait: 0.96},
+	}}
+
+	// Any realistic move: the price is never exactly unchanged.
+	records := []obs.Record{record(0, wait, 3), record(1, wait, -2), record(2, wait, 0.5)}
+
+	opts := Options{QuestionID: jev.QAction, Outcome: OutcomeAction, HorizonSec: 60, BandBps: 0}
+	rep, err := Build(records, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Usable != 0 {
+		t.Fatalf("usable = %d, want 0: wait has no truth without a band", rep.Usable)
+	}
+	if rep.Skipped["wait is unscoreable with -band-bps 0"] != 3 {
+		t.Errorf("skip reasons = %v, want three unscoreable waits", rep.Skipped)
+	}
+
+	// With a band it is a real question again, and these small moves are all
+	// inside a 24bps round trip, so waiting was right every time.
+	opts.BandBps = 24
+	rep, err = Build(records, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Usable != 3 {
+		t.Fatalf("usable = %d, want 3 once a band exists", rep.Usable)
+	}
+	if rep.BaseRate != 1 {
+		t.Errorf("base rate = %v, want 1: every move was inside the band", rep.BaseRate)
 	}
 }
