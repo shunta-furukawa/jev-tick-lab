@@ -235,6 +235,7 @@ func evaluate(
 		Mode:           opts.mode,
 		ModelRequested: opts.model,
 		Snapshot:       snap,
+		Position:       pos,
 		StateText:      state,
 		StateHash:      hex.EncodeToString(sum[:]),
 	}

@@ -235,3 +235,70 @@ func TestRecordRoundTrips(t *testing.T) {
 		t.Errorf("round trip lost data: %+v", back)
 	}
 }
+
+// The gates are a derived column, not a measurement.
+//
+// Shadow mode consumes nothing: decide.Compose runs, its Signal is logged, and
+// no executor reads it. Since Compose is pure, any threshold set can be applied
+// to the logged answers afterwards — which is what makes phase 3 possible, and
+// what makes it safe to start a multi-day collection without having tuned
+// MaxAnomalyNoul first.
+//
+// That only holds if every input Compose reads survives the round trip. This
+// test is what keeps it true.
+func TestSignalIsRederivableFromALoggedRecord(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, 9, 18, 6, 30, 0, 0, time.UTC)
+	snap := marketstate.Snapshot{
+		At: at, Pair: "xrp_jpy", Last: 207.52, BestBid: 207.51, BestAsk: 207.53,
+		SpreadBps: 0.96, BookSynced: true, CircuitBreak: "NONE",
+	}
+	// The answers preflight actually returned on 2026-09-18.
+	answers := map[string]jev.Answer{
+		jev.QAnomaly:    {Type: "noul", Noul: 0.41},
+		jev.QFakeout:    {Type: "noul", Noul: 0.58},
+		jev.QHoldRisk:   {Type: "score", Score: 0.24, Confidence: 0.80},
+		jev.QEntryScore: {Type: "score", Score: 1.45, Confidence: 0.43},
+		jev.QAction: {
+			Type: "choice", Choice: jev.ActionWait, Confidence: 0.78,
+			Probabilities: map[string]float64{jev.ActionWait: 0.83, jev.ActionBuy: 0.17},
+		},
+	}
+	pos := marketstate.Position{Side: "long", Size: 100, EntryPrice: 200, OpenedAt: at.Add(-time.Minute)}
+
+	th := decide.DefaultThresholds()
+	decidedAt := at.Add(561 * time.Millisecond)
+
+	rec := Record{TickID: at.Format(time.RFC3339Nano), At: at, Snapshot: snap, Position: pos, Answers: answers}
+	rec.Signal = decide.Compose(at, decidedAt, snap, answers, pos, th)
+
+	// Round trip through the wire format, as cmd/fill and cmd/calib see it.
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Record
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+
+	// decidedAt is recoverable from the recorded age.
+	rederivedAt := back.At.Add(time.Duration(back.Signal.AgeMs) * time.Millisecond)
+	got := decide.Compose(back.At, rederivedAt, back.Snapshot, back.Answers, back.Position, th)
+
+	if got != rec.Signal {
+		t.Fatalf("re-derived signal differs:\n got %+v\nwant %+v", got, rec.Signal)
+	}
+
+	// And the point of all this: a different threshold set produces a different
+	// answer from the same record, months later.
+	th.MaxAnomalyNoul = 0.60 // above the 0.41 this tick actually returned
+	retuned := decide.Compose(back.At, rederivedAt, back.Snapshot, back.Answers, back.Position, th)
+	if retuned.Gate == decide.GateAnomaly {
+		t.Error("raising MaxAnomalyNoul did not release the anomaly gate")
+	}
+	if rec.Signal.Gate != decide.GateAnomaly {
+		t.Errorf("fixture no longer exercises the anomaly gate: %q", rec.Signal.Gate)
+	}
+}

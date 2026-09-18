@@ -79,17 +79,16 @@ way — see [docs/stream-verification.md](docs/stream-verification.md).
 
 ## Cost
 
-Measured: **1,343 input tokens** for the nine-question batch, at $0.042 per
+Measured: **1,926 input tokens** for the nine-question batch, at $0.042 per
 million, output reported but not billed. The initial experiment runs at a **3s**
-cadence, which is **$1.6–1.8/day** — the range is cold-start versus steady-state
-state size. At 1s it would be $4.9–5.4/day.
+cadence, which is **$2.33/day**; at 1s it would be $7.00.
 
 The VM it runs on is **$0.11/day**: an `e2-micro` with a 30GB standard disk in
 `us-west1`, a configuration chosen to sit inside the GCP Always Free tier, so
 only the external IP and a little egress are billed. That is under 6% of the
 total — cadence and run length are the only levers that matter.
 
-A five-day phase 2 collection is therefore around **$9.60** all in. Phase 1
+A five-day phase 2 collection is therefore around **$12** all in. Phase 1
 makes no model calls at all, so `-mode observe` costs only the VM.
 
 Full breakdown, including how to stop paying between runs, in

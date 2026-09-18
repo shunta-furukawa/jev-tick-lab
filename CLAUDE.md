@@ -153,6 +153,19 @@ anomaly gate and the hold-risk gate before any entry logic can run. This
 ordering is deliberate — Jev's role in this system is primarily a brake, because
 its calibration on financial judgement is exactly what is unproven.
 
+**The gates are a derived column, not a measurement.** Shadow mode consumes
+nothing: `Compose` runs, its `Signal` is logged, and no executor reads it. Since
+`Compose` is pure and every input it reads is in the record — enforced by
+`TestSignalIsRederivableFromALoggedRecord` — a collection taken at one threshold
+set can be re-scored at another months later, exactly.
+
+This matters right now. Preflight measured `anomalous` at 0.41 against a 0.30
+gate on an ordinary market, so the live `Signal` column may be almost entirely
+`gate=anomaly`. **Do not tune on two samples.** Collect, then choose thresholds
+on the evidence; that is what phase 3 is for. Raise the gate only if you want a
+readable live signal during the run, and treat that as an operational
+convenience rather than a tuning decision.
+
 **Code-computed facts brake before model judgement does.** `decide.Compose`
 checks, in this order: is the answer still fresh, can we see the market at all
 (feed stale, or a book never seeded by a `depth_whole`), and does the exchange
@@ -229,22 +242,29 @@ retry 401/422.
 Rate limits at time of writing: **1,200 req/min, 250,000 tokens/sec**.
 A 1s cadence uses 60 rpm. TypeSafe warns these limits move without notice.
 
-**Measured 2026-09-18** by `cmd/preflight`, one call from a laptop:
+**Measured 2026-09-18** by `cmd/preflight`, against a production-shaped state
+([full record](docs/preflight-2026-09-18.md)):
 
 | | |
 |---|---|
-| latency | **535ms** — comfortably inside `MaxDecisionAge` (2s) and the 3s tick |
-| tokens | **1,343 in, 228 out** |
-| state sent | 706 bytes (a cold start; production sends ~1,250, so expect ~1,450–1,500 in) |
+| latency | **561ms** — inside `MaxDecisionAge` (2s), the 3s tick and the 3s timeout |
+| tokens | **1,926 in, 229 out** for a 1,330-byte state |
+| cost | **$0.000081/call — $2.33/day at 3s** |
 
-So the batch is **not** re-tokenised per question — 1,343 tokens for nine
-questions against a 3,863-byte request settles that, and the vendor's "12.2x
-cheaper than asking one at a time" holds. Output tokens are reported but, per
-the pricing above, not billed.
+The batch is **not** re-tokenised per question: 1,926 tokens covers nine
+questions against a 3,863-byte request, so the vendor's "12.2x cheaper than
+asking one at a time" holds and adding questions stays nearly free. Output
+tokens are reported but not billed.
 
-The latency was measured from Japan to an API that lives in AWS us-west-2, so
-the deployed VM in us-west1 should see less. Re-run preflight from the VM to
-confirm before tuning `MaxDecisionAge`.
+Prices tokenise badly — roughly one token per byte — and **46% of the state
+text is the "last 60 one-second closes" line**. Rendering it at `%.3f` or as bps
+deltas would cut that substantially. Not done: the state text is the biggest
+lever on answer quality, so trading 46% of it for about a dollar a week is the
+owner's call.
+
+Latency was measured from Japan to an API in AWS us-west-2. The VM in us-west1
+sits beside it, so expect less; re-measure there before touching
+`MaxDecisionAge`.
 
 Docs: <https://docs.typesafe.ai> — the full page index is at
 <https://docs.typesafe.ai/llms.txt>. Relevant reading: `/primitives`,
@@ -414,10 +434,11 @@ means it typechecks, has tests against a fake, and has never met production.
 | no gaps over an hour | ✅ 3,898 ticks, zero gaps, zero reconnects ([record](docs/phase1-run.md)) |
 | state text read against live data for an hour | ⚠️ minutes only — half of the phase 1 criterion |
 | systemd units | ⚠️ `systemd-analyze verify` passes; never started on a real VM |
-| TypeSafe accepts this question set | ✅ **called 2026-09-18.** All nine questions answered, shapes as documented, pinned version answered |
-| model latency | ✅ **535ms** measured, one sample from Japan. Inside `MaxDecisionAge` |
-| input tokens, so the cost figures | ✅ **1,343** measured at a cold start; ~1,450–1,500 expected in production |
-| `decide` against real answers | ❌ fixtures only. One preflight response is not a run |
+| TypeSafe accepts this question set | ✅ **called 2026-09-18.** All nine answered, shapes as documented, pinned version answered |
+| model latency | ✅ **561ms**, two samples from Japan. Inside `MaxDecisionAge` |
+| input tokens, so the cost figures | ✅ **1,926** measured against a production-shaped state |
+| thresholds are re-derivable offline | ✅ tested — a logged record re-scores exactly under any threshold set |
+| `decide` against real answers | ⚠️ two samples. Both would trip the anomaly gate — see below |
 | `cmd/fill`, `cmd/calib` | ❌ synthetic input only |
 | Terraform | ❌ never applied to a project |
 | `deploy/deploy.sh` | ❌ syntax checked only |

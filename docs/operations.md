@@ -311,19 +311,18 @@ What forfeits the free tier, in order of how easily it happens by accident:
 
 ### The model calls, which are still the actual bill
 
-**Measured 2026-09-18**: 1,343 input tokens for a nine-question batch, at
-$0.042 per million, output reported but not billed. That was against a 706-byte
-cold-start state; production sends around 1,250 bytes, so budget ~1,450–1,500.
+**Measured 2026-09-18** against a production-shaped state: 1,926 input tokens
+for the nine-question batch, at $0.042 per million, output reported but not
+billed. Details in [preflight-2026-09-18.md](preflight-2026-09-18.md).
 
 | cadence | calls/day | per day | per month |
 |---|---|---|---|
-| **3s (the configured default)** | 28,800 | **$1.6 – $1.8** | $49 – $54 |
-| 1s (the premise in CLAUDE.md) | 86,400 | $4.9 – $5.4 | $146 – $163 |
-| 5s | 17,280 | $1.0 – $1.1 | $29 – $33 |
+| **3s (the configured default)** | 28,800 | **$2.33** | $70 |
+| 1s (the premise in CLAUDE.md) | 86,400 | $7.00 | $210 |
+| 5s | 17,280 | $1.40 | $42 |
 
-The range is cold-start versus steady-state token count. `cmd/preflight` now
-waits for 60s of history by default, so a re-run measures the production end of
-it.
+46% of the state text is the 60-closes line, so a cheaper rendering of it is the
+one lever that would move these numbers without changing the cadence.
 
 The machine is now under 6% of the bill. Cadence and run length are the only
 levers that matter.
@@ -335,9 +334,9 @@ at the configured 3s:
 
 ```
 infrastructure   5 × $0.11  =  $0.55
-model calls      5 × $1.79  =  $8.96
+model calls      5 × $2.33  = $11.65
                               -------
-                              ≈ $9.50
+                              ≈ $12.20
 ```
 
 For reference, the same five days at 1s in asia-northeast1 on an e2-small — the

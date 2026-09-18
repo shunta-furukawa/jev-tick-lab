@@ -41,8 +41,11 @@ type Record struct {
 	ModelRequested string `json:"model_requested"`
 	ModelVersion   string `json:"model_version"`
 
-	// Inputs.
+	// Inputs. Position is always flat in shadow mode, but it is recorded
+	// anyway: every input decide.Compose reads has to be in the record, or the
+	// thresholds cannot be re-applied to it later. See TestSignalIsRederivable.
 	Snapshot  marketstate.Snapshot `json:"snapshot"`
+	Position  marketstate.Position `json:"position"`
 	StateText string               `json:"state_text"`
 	StateHash string               `json:"state_hash"`
 
