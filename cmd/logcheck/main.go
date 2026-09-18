@@ -121,7 +121,13 @@ func emitText(rep health.Report) {
 	}
 	fmt.Printf("%s  window %s ending %s\n\n", status, rep.WindowS, rep.At.Format(time.RFC3339))
 
-	fmt.Printf("  records        %d of an expected %d (%.1f%%)\n", rep.Records, rep.Expected, rep.RecordRate*100)
+	fmt.Printf("  records        %d in %s, %.1f%% of the ticks that span should hold\n",
+		rep.Records, time.Duration(rep.CoveredSec)*time.Second, rep.DensityRate*100)
+	if rep.Records > 0 && rep.CoveredSec < rep.Window.Seconds()*0.9 {
+		// Worth saying out loud: otherwise the next line looks like a fault.
+		fmt.Printf("  coverage       %.0f%% of the %s window — the collection is younger than the window\n",
+			rep.RecordRate*100, rep.WindowS)
+	}
 	if rep.Records == 0 {
 		fmt.Printf("  in the log     %d records\n", rep.Scanned)
 		if !rep.NewestOverall.IsZero() {

@@ -97,14 +97,45 @@ func TestAStoppedBotIsCaughtByRecordAge(t *testing.T) {
 	}
 }
 
-func TestPartialCollectionIsCaughtByRecordRate(t *testing.T) {
+// Ticks going missing inside the span the log covers is a fault.
+func TestLostTicksAreCaught(t *testing.T) {
 	t.Parallel()
-	rep := Check(series(3000), now, hour(), DefaultThresholds())
-	if rep.OK() {
-		t.Fatal("83%% collection was reported healthy")
+	// A full hour of coverage, but every sixth second dropped.
+	full := series(3600)
+	var thinned []obs.Record
+	for i, rec := range full {
+		if i%6 != 0 {
+			thinned = append(thinned, rec)
+		}
 	}
-	if !containsMatch(rep.Problems, "expected") {
-		t.Errorf("problems = %v, want one about the record count", rep.Problems)
+	rep := Check(thinned, now, hour(), DefaultThresholds())
+
+	if rep.OK() {
+		t.Fatal("losing a sixth of the ticks was reported healthy")
+	}
+	if !containsMatch(rep.Problems, "ticks are being lost") {
+		t.Errorf("problems = %v", rep.Problems)
+	}
+}
+
+// A collection younger than the window is not a fault, and saying it is
+// produces an alert that fires after every restart and then gets ignored.
+func TestACollectionYoungerThanTheWindowIsNotAFault(t *testing.T) {
+	t.Parallel()
+	// Started thirty minutes ago, perfect since.
+	rep := Check(series(1800), now, hour(), DefaultThresholds())
+
+	if !rep.OK() {
+		t.Fatalf("a young but complete collection was reported unhealthy: %v", rep.Problems)
+	}
+	if rep.RecordRate > 0.55 {
+		t.Errorf("coverage = %.2f, want about 0.5 of the window", rep.RecordRate)
+	}
+	if rep.DensityRate < 0.99 {
+		t.Errorf("density = %.3f, want ~1: every tick in the covered span landed", rep.DensityRate)
+	}
+	if got := time.Duration(rep.CoveredSec) * time.Second; got < 29*time.Minute || got > 31*time.Minute {
+		t.Errorf("covered = %s, want about 30m", got)
 	}
 }
 

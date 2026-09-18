@@ -70,7 +70,9 @@ type Report struct {
 	// apart from a stale one when the window turns up nothing.
 	NewestOverall time.Time `json:"newest_overall"`
 
-	RecordRate   float64 `json:"record_rate"`
+	RecordRate   float64 `json:"record_rate"`  // against the whole window
+	CoveredSec   float64 `json:"covered_sec"`  // first to last record in the window
+	DensityRate  float64 `json:"density_rate"` // against the span actually covered
 	NewestAgeSec float64 `json:"newest_age_sec"`
 
 	Errors       int     `json:"errors"`
@@ -171,6 +173,20 @@ func Check(records []obs.Record, now time.Time, window time.Duration, t Threshol
 	rep.From, rep.To = inWindow[0].At.UTC(), inWindow[len(inWindow)-1].At.UTC()
 	rep.NewestAgeSec = now.Sub(rep.To).Seconds()
 
+	// Two different questions, and conflating them produces an alert that fires
+	// after every restart and then gets ignored:
+	//
+	//   coverage — how much of the window the log spans at all. Low simply
+	//              means the collection is younger than the window.
+	//   density  — how many of the ticks inside that span actually landed. Low
+	//              means ticks are being lost, which is the real fault.
+	//
+	// Only density is a problem. Coverage is reported and explained.
+	rep.CoveredSec = rep.To.Sub(rep.From).Seconds() + t.TickInterval.Seconds()
+	if expected := rep.CoveredSec / t.TickInterval.Seconds(); expected > 0 {
+		rep.DensityRate = float64(rep.Records) / expected
+	}
+
 	for _, rec := range inWindow {
 		if rec.Error != "" {
 			rep.Errors++
@@ -234,9 +250,10 @@ func problems(r Report, t Thresholds) []string {
 		out = append(out, fmt.Sprintf("newest record is %.0fs old (limit %s) — is the bot still writing?",
 			r.NewestAgeSec, t.MaxRecordAge))
 	}
-	if t.MinRecordRate > 0 && r.RecordRate < t.MinRecordRate {
-		out = append(out, fmt.Sprintf("only %d of an expected %d records (%.1f%%, floor %.0f%%)",
-			r.Records, r.Expected, r.RecordRate*100, t.MinRecordRate*100))
+	if t.MinRecordRate > 0 && r.DensityRate < t.MinRecordRate {
+		out = append(out, fmt.Sprintf(
+			"ticks are being lost: %d records across the %s the log covers, %.1f%% of the %.0f%% floor expects",
+			r.Records, time.Duration(r.CoveredSec)*time.Second, r.DensityRate*100, t.MinRecordRate*100))
 	}
 	if t.MaxErrorRate > 0 && r.ErrorRate > t.MaxErrorRate {
 		out = append(out, fmt.Sprintf("%.1f%% of calls failed (ceiling %.1f%%)", r.ErrorRate*100, t.MaxErrorRate*100))
