@@ -20,14 +20,33 @@ func Render(s Snapshot, pos Position) string {
 	fmt.Fprintf(&b, "# Market: %s\n", s.Pair)
 	fmt.Fprintf(&b, "Time: %s\n\n", s.At.UTC().Format("2006-01-02T15:04:05Z"))
 
+	// Anything derived from a window longer than the series says so rather than
+	// reporting a number. A cold start has one bar, and rendering that as
+	// "Return 300s: +0.000%, 5m high == 5m low, volatility 0.0 bps" tells the
+	// model the market has been perfectly frozen for five minutes — which reads
+	// as a halted or broken venue, not as a young process. Preflight caught
+	// exactly that: a healthy xrp_jpy book scored anomalous 0.54 against a
+	// 0.30 gate, seconds after connecting.
+	//
+	// "I do not have this yet" is a true statement. "It is exactly zero" is not.
+	have := len(s.Bars)
+
 	fmt.Fprintf(&b, "## Price\n")
 	fmt.Fprintf(&b, "Last: %.4f\n", s.Last)
-	fmt.Fprintf(&b, "Return 60s: %+.3f%%\n", s.Ret60s*100)
-	fmt.Fprintf(&b, "Return 300s: %+.3f%%\n", s.Ret300s*100)
-	fmt.Fprintf(&b, "SMA20: %.4f (%s)\n", s.SMA20, relation(s.Last, s.SMA20))
-	fmt.Fprintf(&b, "SMA60: %.4f (%s)\n", s.SMA60, relation(s.Last, s.SMA60))
-	fmt.Fprintf(&b, "5m high: %.4f / 5m low: %.4f\n", s.High5m, s.Low5m)
-	fmt.Fprintf(&b, "Realized volatility (1s stdev, 60s): %.1f bps\n\n", s.VolBps)
+	fmt.Fprintf(&b, "Return 60s: %s\n", pctOverWindow(s.Ret60s, have, 61))
+	fmt.Fprintf(&b, "Return 300s: %s\n", pctOverWindow(s.Ret300s, have, 301))
+	fmt.Fprintf(&b, "SMA20: %s\n", smaOverWindow(s.SMA20, s.Last, have, 20))
+	fmt.Fprintf(&b, "SMA60: %s\n", smaOverWindow(s.SMA60, s.Last, have, 60))
+	if have >= 300 {
+		fmt.Fprintf(&b, "5m high: %.4f / 5m low: %.4f\n", s.High5m, s.Low5m)
+	} else {
+		fmt.Fprintf(&b, "5m high / 5m low: %s\n", building(have, 300))
+	}
+	if have >= 60 {
+		fmt.Fprintf(&b, "Realized volatility (1s stdev, 60s): %.1f bps\n\n", s.VolBps)
+	} else {
+		fmt.Fprintf(&b, "Realized volatility (1s stdev, 60s): %s\n\n", building(have, 60))
+	}
 
 	fmt.Fprintf(&b, "## Order book\n")
 	fmt.Fprintf(&b, "Best bid: %.4f / Best ask: %.4f\n", s.BestBid, s.BestAsk)
@@ -79,6 +98,26 @@ func Render(s Snapshot, pos Position) string {
 		}
 	}
 	return b.String()
+}
+
+// building says how much history is still missing, in the same seconds the
+// label promises, so the model can tell a young process from a dead market.
+func building(have, need int) string {
+	return fmt.Sprintf("n/a (%ds of history so far, needs %ds)", have, need)
+}
+
+func pctOverWindow(v float64, have, need int) string {
+	if have < need {
+		return building(have, need)
+	}
+	return fmt.Sprintf("%+.3f%%", v*100)
+}
+
+func smaOverWindow(sma, last float64, have, need int) string {
+	if have < need {
+		return building(have, need)
+	}
+	return fmt.Sprintf("%.4f (%s)", sma, relation(last, sma))
 }
 
 func relation(price, ref float64) string {

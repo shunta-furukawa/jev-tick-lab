@@ -38,7 +38,8 @@ func main() {
 		pair        = flag.String("pair", "xrp_jpy", "bitbank pair to build the state from")
 		model       = flag.String("model", "jev-1.13.0", "the versioned model id to pin")
 		tick        = flag.Duration("tick", 3*time.Second, "the cadence the run will use, so the latency verdict is about your deployment")
-		warmup      = flag.Duration("warmup", 30*time.Second, "how long to wait for a usable market snapshot")
+		minHist     = flag.Duration("min-history", time.Minute, "wait for this much bar history before sending; a cold state is smaller, so measuring tokens against one undercounts")
+		warmup      = flag.Duration("warmup", 2*time.Minute, "how long to wait for a usable market snapshot")
 		callTimeout = flag.Duration("call-timeout", 10*time.Second, "deadline for the one call; deliberately looser than the bot's 3s")
 		stateFile   = flag.String("state", "", "send this file as the state instead of connecting to bitbank")
 		showState   = flag.Bool("show-state", false, "print the state text that was sent")
@@ -50,13 +51,13 @@ func main() {
 	)
 	flag.Parse()
 
-	if err := run(*pair, *model, *tick, *warmup, *callTimeout, *stateFile, *showState, *pricePerM, *dryRun); err != nil {
+	if err := run(*pair, *model, *tick, *minHist, *warmup, *callTimeout, *stateFile, *showState, *pricePerM, *dryRun); err != nil {
 		fmt.Fprintln(os.Stderr, "\npreflight FAILED:", err)
 		os.Exit(1)
 	}
 }
 
-func run(pair, model string, tick, warmup, callTimeout time.Duration, stateFile string, showState bool, pricePerM float64, dryRun bool) error {
+func run(pair, model string, tick, minHist, warmup, callTimeout time.Duration, stateFile string, showState bool, pricePerM float64, dryRun bool) error {
 	apiKey := os.Getenv("TYPESAFE_API_KEY")
 	if apiKey == "" && !dryRun {
 		return fmt.Errorf("TYPESAFE_API_KEY is not set; this command exists to make a real call. Use -dry-run to check everything up to the call")
@@ -71,7 +72,7 @@ func run(pair, model string, tick, warmup, callTimeout time.Duration, stateFile 
 	ctx, cancel := context.WithTimeout(context.Background(), warmup+callTimeout+10*time.Second)
 	defer cancel()
 
-	state, err := buildState(ctx, pair, warmup, stateFile)
+	state, err := buildState(ctx, pair, minHist, warmup, stateFile)
 	if err != nil {
 		return err
 	}
@@ -117,7 +118,7 @@ func run(pair, model string, tick, warmup, callTimeout time.Duration, stateFile 
 // buildState renders a real market state, because sending something synthetic
 // would leave the one thing preflight is for — does the real payload work —
 // untested.
-func buildState(ctx context.Context, pair string, warmup time.Duration, stateFile string) (string, error) {
+func buildState(ctx context.Context, pair string, minHist, warmup time.Duration, stateFile string) (string, error) {
 	if stateFile != "" {
 		b, err := os.ReadFile(stateFile)
 		return string(b), err
@@ -144,14 +145,14 @@ func buildState(ctx context.Context, pair string, warmup time.Duration, stateFil
 	poll := time.NewTicker(250 * time.Millisecond)
 	defer poll.Stop()
 
-	fmt.Printf("stream        connecting to %s, waiting up to %s for a seeded book\n", pair, warmup)
+	fmt.Printf("stream        connecting to %s, waiting up to %s for a seeded book and %s of history\n", pair, warmup, minHist)
 	for {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
 
 		case <-deadline:
-			return "", fmt.Errorf("no usable snapshot after %s; run `go run ./cmd/dump` to see what the stream is doing", warmup)
+			return "", fmt.Errorf("no usable snapshot after %s (need %s of history); run `go run ./cmd/dump` to see what the stream is doing", warmup, minHist)
 
 		case ev := <-sc.Events:
 			switch ev.Room {
@@ -169,12 +170,14 @@ func buildState(ctx context.Context, pair string, warmup time.Duration, stateFil
 
 		case <-poll.C:
 			snap := book.Snapshot(time.Now().UTC())
-			// The same warmup condition the bot uses: a price, and a book that
-			// a depth_whole has seeded.
-			if snap.Last == 0 || !snap.BookSynced {
+			// The same warmup condition the bot uses: a price, a book that a
+			// depth_whole has seeded, and enough history that the state text is
+			// not mostly "still building".
+			if snap.Last == 0 || !snap.BookSynced || snap.HistorySeconds() < int(minHist.Seconds()) {
 				continue
 			}
-			fmt.Printf("stream        warmed up: last %.4f, spread %.3f bps\n", snap.Last, snap.SpreadBps)
+			fmt.Printf("stream        warmed up: last %.4f, spread %.3f bps, %ds of history\n",
+				snap.Last, snap.SpreadBps, snap.HistorySeconds())
 			return marketstate.Render(snap, marketstate.Position{}), nil
 		}
 	}

@@ -104,6 +104,12 @@ type Snapshot struct {
 	Stale bool // true when no market data of any kind has arrived recently
 }
 
+// HistorySeconds is how many seconds of continuous bar series back this
+// snapshot. The series is one bar per wall-clock second regardless of the
+// evaluation cadence, so this is directly comparable to the window lengths the
+// state text quotes.
+func (s Snapshot) HistorySeconds() int { return len(s.Bars) }
+
 // Halted reports whether the exchange itself says this market is not trading
 // normally. This is a fact off the wire, not a judgement — the model is never
 // asked about it.

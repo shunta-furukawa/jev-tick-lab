@@ -79,13 +79,10 @@ way — see [docs/stream-verification.md](docs/stream-verification.md).
 
 ## Cost
 
-At roughly 1,500 input tokens per call and $0.042 per million input tokens, one
-second of evaluation costs about $0.000063. Output tokens are not billed. So
-continuous collection is **$5.44/day**, and eight hours a day is under $2.
-
-That token count is an assumption — `cmd/preflight` prints the real one.
-
-The initial experiment runs at a **3s** cadence rather than 1s, which is $1.81/day.
+Measured: **1,343 input tokens** for the nine-question batch, at $0.042 per
+million, output reported but not billed. The initial experiment runs at a **3s**
+cadence, which is **$1.6–1.8/day** — the range is cold-start versus steady-state
+state size. At 1s it would be $4.9–5.4/day.
 
 The VM it runs on is **$0.11/day**: an `e2-micro` with a 30GB standard disk in
 `us-west1`, a configuration chosen to sit inside the GCP Always Free tier, so

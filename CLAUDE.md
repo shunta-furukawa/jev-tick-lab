@@ -129,11 +129,21 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 its tick rather than queue, because a queued answer describes a market that no
 longer exists. See `inFlight` in `cmd/bot/main.go`.
 
-The headroom depends on a latency nobody here has measured. The `-tick` flag
-defaults to 1s, the initial experiment runs at 3s, and the model is assumed to
-answer in ~400ms. If it is slower than `Thresholds.MaxDecisionAge` (2s) the run
-collects answers and produces no signals at all — every record gated
-`decision_age`. `cmd/preflight` measures it and says so.
+**Nothing is evaluated until the state is worth reading.** `-min-history`
+(default 60s) holds the tick loop until the bar series is long enough that the
+state text is not mostly "still building". Two reasons, and the second is the
+one that cost real money to learn: a nearly-empty state is not worth paying a
+model to read, and — before the renderer was fixed — it actively lied. A series
+one bar long rendered as "Return 300s: +0.000%, 5m high == 5m low, volatility
+0.0 bps", which describes a halted venue. Preflight scored a perfectly healthy
+xrp_jpy book at `anomalous` 0.54 against a 0.30 gate for exactly that reason.
+Windows longer than the series now say how much history they are missing.
+
+Measured latency is 535ms against a 3s cadence, so there is room. Had it
+exceeded `Thresholds.MaxDecisionAge` (2s) the run would have collected answers
+and produced no decisions at all — every record gated `decision_age`.
+`cmd/preflight` measures it and says so, which is why it runs before the
+collection rather than after.
 
 **Decision freshness is bounded.** `Thresholds.MaxDecisionAge` (2s). Anything
 older is discarded rather than acted on.
@@ -219,15 +229,22 @@ retry 401/422.
 Rate limits at time of writing: **1,200 req/min, 250,000 tokens/sec**.
 A 1s cadence uses 60 rpm. TypeSafe warns these limits move without notice.
 
-**How input tokens are billed for a batch is not known.** The request measures
-3,863 bytes — 2,537 of question definitions and 1,250 of state text — which is
-roughly 860–1,100 tokens by a bytes-per-token estimate. But questions are
-evaluated "in parallel and in isolation", and if that means the state is
-re-tokenised per question, the billed figure is several times higher. The
-vendor's own claim that a 13-question batch is 12.2x cheaper than asking one at
-a time argues against that. Nobody here has seen a real `usage` field yet:
-`cmd/preflight` prints it, and every cost figure in this repository is an
-assumption until it has been run.
+**Measured 2026-09-18** by `cmd/preflight`, one call from a laptop:
+
+| | |
+|---|---|
+| latency | **535ms** — comfortably inside `MaxDecisionAge` (2s) and the 3s tick |
+| tokens | **1,343 in, 228 out** |
+| state sent | 706 bytes (a cold start; production sends ~1,250, so expect ~1,450–1,500 in) |
+
+So the batch is **not** re-tokenised per question — 1,343 tokens for nine
+questions against a 3,863-byte request settles that, and the vendor's "12.2x
+cheaper than asking one at a time" holds. Output tokens are reported but, per
+the pricing above, not billed.
+
+The latency was measured from Japan to an API that lives in AWS us-west-2, so
+the deployed VM in us-west1 should see less. Re-run preflight from the VM to
+confirm before tuning `MaxDecisionAge`.
 
 Docs: <https://docs.typesafe.ai> — the full page index is at
 <https://docs.typesafe.ai/llms.txt>. Relevant reading: `/primitives`,
@@ -397,16 +414,17 @@ means it typechecks, has tests against a fake, and has never met production.
 | no gaps over an hour | ✅ 3,898 ticks, zero gaps, zero reconnects ([record](docs/phase1-run.md)) |
 | state text read against live data for an hour | ⚠️ minutes only — half of the phase 1 criterion |
 | systemd units | ⚠️ `systemd-analyze verify` passes; never started on a real VM |
-| **TypeSafe accepts this question set** | ❌ **never called.** `jev.Validate` is local only |
-| **model latency** | ❌ assumed ~400ms. If it exceeds `MaxDecisionAge` (2s), every signal is gated stale |
-| **input tokens, so every cost figure** | ❌ assumed 1,500/call. Payload measures 3,863 bytes |
-| `decide` against real answers | ❌ fixtures only |
+| TypeSafe accepts this question set | ✅ **called 2026-09-18.** All nine questions answered, shapes as documented, pinned version answered |
+| model latency | ✅ **535ms** measured, one sample from Japan. Inside `MaxDecisionAge` |
+| input tokens, so the cost figures | ✅ **1,343** measured at a cold start; ~1,450–1,500 expected in production |
+| `decide` against real answers | ❌ fixtures only. One preflight response is not a run |
 | `cmd/fill`, `cmd/calib` | ❌ synthetic input only |
 | Terraform | ❌ never applied to a project |
 | `deploy/deploy.sh` | ❌ syntax checked only |
 
-The bolded rows are all settled by one `cmd/preflight` call, which is why it
-comes before the long run.
+The bolded rows used to be the unknowns; one `cmd/preflight` call settled them
+on 2026-09-18, and found a real defect doing it — see `-min-history` above.
+That is what the step is for.
 
 ## Next, in order
 
@@ -416,19 +434,14 @@ on a laptop and costs under a dollar; only then is it worth building a VM.
 1. **Finish phase 1.** An hour of `-mode observe -print-state`, actually read.
    No API key, no GCP, no cost, and it is the outstanding half of the criterion.
 
-2. **`make preflight`, locally.** The moment a TypeSafe key exists. One call,
-   about $0.00006, and it settles all four bold rows above: whether the API
-   accepts this question set, the real latency, the real token count, and
-   therefore every cost figure here. Its exit code says whether to go on.
-
-   In particular it answers a question that decides the shape of the run: if
-   latency exceeds `MaxDecisionAge` (2s), every signal is gated stale and the
-   collection produces answers with no decisions attached. Better to learn that
-   from one call than from a day of records.
+2. ~~`make preflight`~~ — **done 2026-09-18.** The contract holds, latency is
+   535ms, and the token count is measured. It also exposed the cold-start state
+   defect that `-min-history` and the renderer now fix. Worth one more call from
+   the VM once it exists, to measure latency on the path that will actually run.
 
 3. **A short local shadow run.** Half an hour of
    `go run ./cmd/bot -mode shadow -tick 3s -log-dir ./data`, then
-   `make logcheck`. About $0.04. This is the first time the record schema, the
+   `make logcheck -- -tick 3s`. About $0.04. This is the first time the record schema, the
    gates, the logger and the health check meet real answers, and it is much
    cheaper to find a problem here than on a VM three days in.
 

@@ -35,6 +35,7 @@ func main() {
 		model   = flag.String("model", "jev-1.13.0", "TypeSafe model id — pin a version, never use an alias in a recorded run")
 		logDir  = flag.String("log-dir", "./data", "directory for JSONL tick logs")
 		tick    = flag.Duration("tick", time.Second, "evaluation cadence")
+		minHist = flag.Duration("min-history", time.Minute, "do not evaluate until the bar series is at least this long")
 		timeout = flag.Duration("call-timeout", 3*time.Second, "hard deadline for one Jev evaluation")
 		// Phase 1's exit criterion is "the state text renders correctly against
 		// live data", which needs a way to actually look at it.
@@ -44,13 +45,13 @@ func main() {
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if err := run(log, *pair, *mode, *model, *logDir, *tick, *timeout, *printState); err != nil {
+	if err := run(log, *pair, *mode, *model, *logDir, *tick, *timeout, *minHist, *printState); err != nil {
 		log.Error("exiting", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout time.Duration, printState bool) error {
+func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minHist time.Duration, printState bool) error {
 	switch mode {
 	case "observe", "shadow":
 	case "paper":
@@ -151,16 +152,26 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout time.
 
 			// A tick without a price, or without a book that a depth_whole has
 			// seeded, has nothing to judge.
-			if snap.Last == 0 || !snap.BookSynced {
+			//
+			// Nor does one without history. The series starts empty, so for the
+			// first minute most of the state text is "n/a, still building" —
+			// honest, but not worth paying a model to read. Waiting also keeps
+			// the dataset free of records that describe a market nobody could
+			// have formed a view on.
+			history := snap.HistorySeconds()
+			if snap.Last == 0 || !snap.BookSynced || history < int(minHist.Seconds()) {
 				if ready || !warnedNotReady {
-					log.Warn("not ready", "last", snap.Last, "book_synced", snap.BookSynced, "stale", snap.Stale)
+					log.Warn("not ready",
+						"last", snap.Last, "book_synced", snap.BookSynced,
+						"history_s", history, "need_history_s", int(minHist.Seconds()),
+						"stale", snap.Stale)
 					warnedNotReady = true
 				}
 				ready = false
 				continue
 			}
 			if !ready {
-				log.Info("warmed up", "last", snap.Last, "spread_bps", snap.SpreadBps)
+				log.Info("warmed up", "last", snap.Last, "spread_bps", snap.SpreadBps, "history_s", history)
 				ready, warnedNotReady = true, false
 			}
 
