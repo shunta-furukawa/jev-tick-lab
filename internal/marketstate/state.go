@@ -19,7 +19,18 @@ import (
 )
 
 const (
-	barCapacity   = 300 // 5 minutes of 1s bars
+	// The longest window the state text quotes.
+	longestWindowSec = 300
+
+	// A return over N seconds needs N+1 samples: the price then, and the price
+	// now. The prototype capped the series at exactly 300, one short, which
+	// made "Return 300s" structurally impossible to compute — ret() returned 0
+	// on every call and the state text reported "+0.000%" in every snapshot
+	// ever rendered, at minute one and at minute sixty alike.
+	//
+	// Found by reading an hour of live state text, which is exactly what the
+	// phase 1 exit criterion is for. See TestEveryQuotedWindowIsComputable.
+	barCapacity   = longestWindowSec + 1
 	tradeCapacity = 2000
 	depthLevels   = 10 // levels aggregated for the imbalance figures
 

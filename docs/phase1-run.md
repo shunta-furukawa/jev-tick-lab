@@ -3,8 +3,8 @@
 CLAUDE.md's phase 1 exit criterion: *the state text renders correctly against
 live data for an hour with no gaps.*
 
-**Run:** `xrp_jpy`, `-mode observe`, 2026-09-18 00:30:56 – 01:35:56 UTC, 65
-minutes, 1s cadence. Raw journal: `docs/evidence/phase1-observe-2026-09-18.log.gz`.
+**Runs:** `xrp_jpy`, `-mode observe`. First 00:30:56–01:35:56 UTC at 1s (gaps);
+second 06:05:48–07:11:53 UTC at 3s with `-print-state` (rendering). Raw journal: `docs/evidence/phase1-observe-2026-09-18.log.gz`.
 
 Not from the production VM — this ran from a development container, so the
 network path is not the one a deployed run would take. What it exercises is the
@@ -33,7 +33,49 @@ is restored.
 One `not ready` warning, one second after start, before the rooms were joined —
 which is the warmup path doing exactly what it should.
 
-### Renders correctly: not met
+### Renders correctly: met on the second run, and it found a bug
+
+**Second run, 2026-09-18 06:05–07:11 UTC**, 3s cadence with `-print-state`:
+1,319 rendered states, mechanically checked and sampled by eye.
+
+| | |
+|---|---|
+| structural or numeric problems | **0** across all 1,319 |
+| cadence gaps > 6s | **0** |
+| time monotonic | yes |
+| closes per state | 4 rising to 60, as the series fills |
+| spread | median 0.048 bps, max 2.99 |
+| states with no print in the whole 60s window | 48 (3.6%) |
+
+Checked per state: every section and label present; no NaN or Inf anywhere;
+`last > 0`; `bid < ask`; spread non-negative; imbalance within 0–100%; book age
+within 0–60s; `5m high >= 5m low`; `last` inside the 5m range; every close
+parseable and positive; no more than 60 closes; untraded count never exceeding
+the window.
+
+#### What the hour found
+
+**`Return 300s` read `+0.000%` in 100% of states** — all 1,319, at minute one
+and at minute sixty alike. Not a warmup effect: a permanent bug.
+
+`barCapacity` was 300 while `ret(closes, 300)` needs 301 samples — the price
+300 seconds ago and the price now. The series could never exceed 300 bars, so
+the guard `len(closes) <= n` was always true and the function returned zero on
+every call. Every state text this project has ever produced told the model the
+five-minute return was exactly zero.
+
+Nothing in the unit tests caught it, because they all built series shorter than
+the cap. Nothing in a five-minute smoke test would catch it either. It took an
+hour of live output, which is what this criterion is for.
+
+Fixed: `barCapacity = longestWindowSec + 1`, with
+`TestEveryQuotedWindowIsComputable` asserting that every window the state text
+quotes is computable from a series the book will actually hold.
+
+#### Previously
+
+The first run logged snapshot fields rather than rendered text, so the
+rendering half was outstanding. What follows is that first run.
 
 This run logged snapshot fields rather than rendered text, to keep the journal
 machine-readable. What exists instead: `TestRenderGolden` pins the format, the

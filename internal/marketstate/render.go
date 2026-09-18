@@ -37,10 +37,10 @@ func Render(s Snapshot, pos Position) string {
 	fmt.Fprintf(&b, "Return 300s: %s\n", pctOverWindow(s.Ret300s, have, 301))
 	fmt.Fprintf(&b, "SMA20: %s\n", smaOverWindow(s.SMA20, s.Last, have, 20))
 	fmt.Fprintf(&b, "SMA60: %s\n", smaOverWindow(s.SMA60, s.Last, have, 60))
-	if have >= 300 {
+	if have >= longestWindowSec+1 {
 		fmt.Fprintf(&b, "5m high: %.4f / 5m low: %.4f\n", s.High5m, s.Low5m)
 	} else {
-		fmt.Fprintf(&b, "5m high / 5m low: %s\n", building(have, 300))
+		fmt.Fprintf(&b, "5m high / 5m low: %s\n", building(have, longestWindowSec+1))
 	}
 	if have >= 60 {
 		fmt.Fprintf(&b, "Realized volatility (1s stdev, 60s): %.1f bps\n\n", s.VolBps)

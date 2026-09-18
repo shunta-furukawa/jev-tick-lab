@@ -49,7 +49,7 @@ Time: 2026-09-17T12:00:00Z
 ## Price
 Last: 202.2600
 Return 60s: -0.015%
-Return 300s: n/a (300s of history so far, needs 301s)
+Return 300s: -0.005%
 SMA20: 202.2805 (price below)
 SMA60: 202.2800 (price below)
 5m high: 202.3100 / 5m low: 202.2500

@@ -409,7 +409,7 @@ Do not skip ahead. Each phase gates the next.
 
 | Phase | `-mode` | State | Exit criteria |
 |---|---|---|---|
-| 1 | `observe` | 🔨 **half met** — 65 min live, 3,898 ticks, zero gaps, zero reconnects; the rendered text was only eyeballed for minutes ([record](docs/phase1-run.md)) | State text renders correctly against live data for an hour with no gaps |
+| 1 | `observe` | ✅ **met** — two hours live, 5,217 ticks, zero gaps; 1,319 rendered states checked, which found a permanent `Return 300s` bug ([record](docs/phase1-run.md)) | State text renders correctly against live data for an hour with no gaps |
 | 2 | `shadow` | 🔨 code complete, not yet run for real | Several days of clean tick logs, no trading |
 | 3 | — | 🔨 tooling built (`cmd/fill`, `cmd/calib`), no real data yet | Calibration analysis run; question set revised on the evidence |
 | 4 | `paper` | ⬜ not started, `-mode paper` exits with an error | Fill simulator with realistic maker/taker and queue assumptions |
@@ -432,7 +432,7 @@ means it typechecks, has tests against a fake, and has never met production.
 | depth sequencing | ✅ unit tested against bitbank's own worked example; 65 min live with zero unsynced ticks |
 | indicator maths, state text format | ✅ unit tested, golden test on the rendering |
 | no gaps over an hour | ✅ 3,898 ticks, zero gaps, zero reconnects ([record](docs/phase1-run.md)) |
-| state text read against live data for an hour | ⚠️ minutes only — half of the phase 1 criterion |
+| state text read against live data for an hour | ✅ 1,319 states checked structurally and by eye; found the `Return 300s` bug |
 | systemd units | ⚠️ `systemd-analyze verify` passes; never started on a real VM |
 | TypeSafe accepts this question set | ✅ **called 2026-09-18.** All nine answered, shapes as documented, pinned version answered |
 | model latency | ✅ **561ms**, two samples from Japan. Inside `MaxDecisionAge` |
@@ -449,36 +449,33 @@ That is what the step is for.
 
 ## Next, in order
 
-Ordered by what it costs to find out you are wrong. Everything up to step 3 runs
+Ordered by what it costs to find out you are wrong. Everything up to step 2 runs
 on a laptop and costs under a dollar; only then is it worth building a VM.
 
-1. **Finish phase 1.** An hour of `-mode observe -print-state`, actually read.
-   No API key, no GCP, no cost, and it is the outstanding half of the criterion.
-
-2. ~~`make preflight`~~ — **done 2026-09-18.** The contract holds, latency is
+1. ~~`make preflight`~~ — **done 2026-09-18.** The contract holds, latency is
    535ms, and the token count is measured. It also exposed the cold-start state
    defect that `-min-history` and the renderer now fix. Worth one more call from
    the VM once it exists, to measure latency on the path that will actually run.
 
-3. **A short local shadow run.** Half an hour of
+2. **A short local shadow run.** Half an hour of
    `go run ./cmd/bot -mode shadow -tick 3s -log-dir ./data`, then
    `make logcheck -- -tick 3s`. About $0.04. This is the first time the record schema, the
    gates, the logger and the health check meet real answers, and it is much
    cheaper to find a problem here than on a VM three days in.
 
-4. **`terraform apply`, then seed the secret.** See
+3. **`terraform apply`, then seed the secret.** See
    [docs/operations.md](docs/operations.md). Nothing here has been applied to a
    real project, so budget for fixing something on the first attempt.
 
-5. **Deploy and run phase 2 for several days.** The whole point, and it needs no
+4. **Deploy and run phase 2 for several days.** The whole point, and it needs no
    execution code. Pin `-model` and leave it alone. Watch the hourly logcheck
    verdict rather than the tick log.
 
-6. **Phase 3.** Expect to find that some question has no usable ground truth.
+5. **Phase 3.** Expect to find that some question has no usable ground truth.
    Start with `book_pressure`: phase 1 measured the book as bid-heavy 70% of the
    time, so its base rate may be structural rather than informative.
 
-7. **`internal/exec/paper.go`** — phase 4, and the point at which the region
+6. **`internal/exec/paper.go`** — phase 4, and the point at which the region
    decision above needs revisiting. Do not start it early.
 
 ## Things deliberately not built

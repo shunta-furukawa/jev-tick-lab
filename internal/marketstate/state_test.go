@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -431,5 +432,58 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Every window the state text quotes must actually be computable from a series
+// the book is willing to hold.
+//
+// It was not. barCapacity was 300 while a 300-second return needs 301 samples,
+// so "Return 300s" read +0.000% in every state ever rendered — not during
+// warmup, but permanently. An hour of live output made it obvious; nothing in
+// the unit tests did, because they all built series shorter than the cap.
+func TestEveryQuotedWindowIsComputable(t *testing.T) {
+	t.Parallel()
+	b := NewBook("xrp_jpy")
+	must(t, b.ApplyDepthWhole(whole(1, t0, [][2]string{{"100", "1"}}, [][2]string{{"101", "1"}})))
+
+	// Ten minutes of a steadily moving price — twice the longest window, so
+	// nothing here is a warmup effect.
+	const span = 600
+	for i := 0; i < span; i++ {
+		at := t0.Add(time.Duration(i) * time.Second)
+		must(t, b.ApplyTransactions(txs(Trade{At: at, Side: "buy", Price: 100 + float64(i)*0.01, Amount: 1})))
+	}
+	s := b.Snapshot(t0.Add((span - 1) * time.Second))
+
+	if got := s.HistorySeconds(); got <= longestWindowSec {
+		t.Fatalf("series holds %ds, which cannot express a %ds window", got, longestWindowSec)
+	}
+	for _, c := range []struct {
+		name string
+		got  float64
+	}{
+		{"Ret60s", s.Ret60s},
+		{"Ret300s", s.Ret300s},
+		{"SMA20", s.SMA20},
+		{"SMA60", s.SMA60},
+		{"VolBps", s.VolBps},
+		{"High5m", s.High5m},
+		{"Low5m", s.Low5m},
+	} {
+		if c.got == 0 {
+			t.Errorf("%s is zero on a ten-minute rising series; the window cannot be computed", c.name)
+		}
+	}
+	if s.High5m == s.Low5m {
+		t.Error("the 5m range is empty on a steadily rising series")
+	}
+
+	// And the rendered text must not be claiming a flat market.
+	text := Render(s, Position{})
+	for _, forbidden := range []string{"Return 300s: +0.000%", "Return 60s: +0.000%"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("state text still reports %q after ten minutes of movement", forbidden)
+		}
 	}
 }
