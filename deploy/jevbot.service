@@ -1,0 +1,34 @@
+[Unit]
+Description=jevbot - Jev day-trading reproduction experiment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jevbot
+WorkingDirectory=/opt/jevbot
+
+# Secrets come from the environment only. Populate this file at boot from
+# Secret Manager; never bake a key into the image or commit one.
+EnvironmentFile=/etc/jevbot/env
+
+ExecStart=/opt/jevbot/bot -pair xrp_jpy -mode shadow -model jev-1.13.0 -log-dir /opt/jevbot/data
+
+Restart=always
+RestartSec=5
+
+# SIGTERM lets the tick loop finish and flush the log. In live mode this window
+# is also where positions must be flattened, so do not shorten it.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/jevbot/data
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

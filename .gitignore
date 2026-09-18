@@ -1,0 +1,5 @@
+bin/
+data/
+*.jsonl
+.env
+*.key
