@@ -81,10 +81,10 @@ file will double up a position.
 
 ```
 bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicators)
-                                        │
-                              every 1s  │  Render() → state text
-                                        ▼
-                                   jev.Ask()  (async, max 1 in flight)
+  ticker                                │
+  depth_whole / depth_diff              │  every 1s  Render() → state text
+  transactions                          ▼
+  circuit_break_info               jev.Ask()  (async, max 1 in flight)
                                         │
                                         ▼
                                  decide.Compose()  ← all weights live here
@@ -92,6 +92,9 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
                         ┌───────────────┴───────────────┐
                         ▼                               ▼
                  obs.Logger (JSONL)              executor (paper/live)
+                        │
+                        ▼
+              cmd/fill ──▶ cmd/calib (phase 3)
 ```
 
 ### Package responsibilities
@@ -104,6 +107,14 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `internal/decide` | Thresholds, gating order, signal composition | Any I/O; must stay pure and testable |
 | `internal/obs` | JSONL records, rotation | Any blocking work in the hot path |
 | `internal/exec` | Fill simulation, order placement | Reading Jev answers directly — it consumes `decide.Signal` only |
+| `internal/calib` | Reliability bins, Brier, ECE, outcome definitions | Any I/O; `cmd/calib` reads the files |
+
+| Command | Does |
+|---|---|
+| `cmd/bot` | The tick loop. `-mode observe\|shadow` |
+| `cmd/dump` | Prints raw stream frames. Does not import `internal/stream`, so it shows the wire rather than our reading of it |
+| `cmd/fill` | Forward-fill: joins each logged tick to the price 10s/60s/300s later |
+| `cmd/calib` | The calibration report: stated probability against realised frequency |
 
 ### Key design decisions and why
 
@@ -120,8 +131,25 @@ anomaly gate and the hold-risk gate before any entry logic can run. This
 ordering is deliberate — Jev's role in this system is primarily a brake, because
 its calibration on financial judgement is exactly what is unproven.
 
+**Code-computed facts brake before model judgement does.** `decide.Compose`
+checks, in this order: is the answer still fresh, can we see the market at all
+(feed stale, or a book never seeded by a `depth_whole`), and does the exchange
+itself say this market is halted. Only then does anything Jev said get a vote.
+All three are facts off the wire, so asking about them would violate rule 2.
+
+**The spread is a gate, not a question.** An all-taker round trip on a JPY alt
+is 24bps. `Thresholds.MaxSpreadBps` blocks new entries when the book is wider
+than crossing it can pay for. It deliberately does not block exits: a brake
+that traps a position is not a brake.
+
+**Every signal carries a `Gate`.** Free-text `Reason` is for a human reading the
+log; `Gate` is a stable enum, so "how often did each brake fire" is a group-by
+rather than a string match. Treat it like a question id: append, never rename.
+
 **Everything is logged, including failures.** A failed call writes a record with
-`error` set. Gaps in the log are themselves data.
+`error` set. Gaps in the log are themselves data. Each run also writes one row
+to `runs-YYYY-MM-DD.jsonl` with its thresholds, question set and hash, so a tick
+recorded months ago is still interpretable.
 
 ---
 
@@ -187,15 +215,35 @@ and `/model-jaggedness/jev-1.13` (the vendor's own list of known weak spots).
 Rooms: `ticker_{pair}`, `transactions_{pair}`, `depth_whole_{pair}`,
 `depth_diff_{pair}`.
 
-⚠️ The exact room names and payload field names in `internal/stream` and
-`internal/marketstate` were written from secondary sources and **have not been
-verified against a live connection**. Verify against
-<https://github.com/bitbankinc/bitbank-api-docs> before relying on them, and fix
-them in place if they differ.
+✅ **Verified against a live connection on 2026-09-17.** Room names, handshake
+and payload fields are as implemented; the captured frames and the list of what
+the verification changed are in [docs/stream-verification.md](docs/stream-verification.md).
+Re-check with `go run ./cmd/dump` after any exchange-side change.
 
 **Depth handling**: `depth_whole` is a full snapshot, `depth_diff` is
-incremental with amount `0` meaning delete. There is a `sequenceId` on both.
-Gap detection is currently **not implemented** — see TODO below.
+incremental with amount `0` meaning delete. Both carry the same sequence id
+(`sequenceId` on the whole, `s` on the diff), **as a JSON string**, despite the
+docs table calling it a number.
+
+Sequence ids rise monotonically but are explicitly *not* consecutive, so a gap
+cannot be detected by arithmetic. bitbank's own algorithm, which
+`marketstate.Book` implements, is:
+
+1. Buffer diffs; do not serve a book that no `depth_whole` has seeded.
+2. On a whole: replace the book, then replay only the buffered diffs whose `s`
+   exceeds its `sequenceId`, in ascending order. Wholes arrive delayed relative
+   to diffs, so without the replay the book loses that window.
+3. Ignore any diff at or below the book's current sequence.
+
+A whole is not optional housekeeping: diffs only cover ~200 levels from the
+best bid and ask, so the periodic whole is the only thing that drops a level
+that fell out of range.
+
+**Trades are sparse.** Over a 30s sample, `btc_jpy` printed once and `xrp_jpy`
+not at all. The 1s bar series is therefore continuous in wall-clock seconds
+with carried-forward closes, not one bar per print — otherwise "the last 60
+bars" spans minutes while the state text calls it 60 seconds. The `ticker` room
+is what keeps the series alive on a quiet pair.
 
 **Fees** (as of the 2026-02-02 schedule; a maker-rebate campaign, so re-check):
 
@@ -217,11 +265,11 @@ Do not skip ahead. Each phase gates the next.
 
 | Phase | `-mode` | State | Exit criteria |
 |---|---|---|---|
-| 1 | `observe` | 🔨 skeleton exists, unverified | State text renders correctly against live data for an hour with no gaps |
-| 2 | `shadow` | 🔨 skeleton exists | Several days of clean tick logs, no trading |
-| 3 | — | ⬜ not started | Calibration analysis run; question set revised on the evidence |
-| 4 | `paper` | ⬜ not started | Fill simulator with realistic maker/taker and queue assumptions |
-| 5 | `live` | ⬜ blocked | Minimum size only, after daily loss cap + flatten-on-death exist |
+| 1 | `observe` | ✅ stream verified, state renders against live data | An hour of live running with no gaps — **still to do**: only minutes have been run so far |
+| 2 | `shadow` | 🔨 code complete, not yet run for real | Several days of clean tick logs, no trading |
+| 3 | — | 🔨 tooling built (`cmd/fill`, `cmd/calib`), no real data yet | Calibration analysis run; question set revised on the evidence |
+| 4 | `paper` | ⬜ not started, `-mode paper` exits with an error | Fill simulator with realistic maker/taker and queue assumptions |
+| 5 | `live` | ⬜ blocked, `-mode live` exits with an error | Minimum size only, after daily loss cap + flatten-on-death exist |
 
 **Phase 2 is where the value is.** It requires no execution code at all and
 answers the interesting question. Resist building the executor early.
@@ -230,24 +278,33 @@ answers the interesting question. Resist building the executor early.
 
 ## Immediate TODO
 
-1. **Verify the bitbank stream contract against live data.** Connect, dump raw
-   frames, confirm room names and field names. Fix `internal/stream` and
-   `internal/marketstate` where they differ. Nothing else is trustworthy until
-   this is done.
-2. **`go.sum` / dependency fetch.** Only `gorilla/websocket` is required so far.
-3. **Sequence-gap detection on the depth book.** Track `sequenceId`; on a gap,
-   discard the book and wait for the next `depth_whole`. Currently diffs are
-   applied blindly, so the book can silently drift.
-4. **Unit tests for `internal/decide`.** It is pure — table-driven tests over
-   answer fixtures covering each gate. This is the highest-value test in the repo.
-5. **Unit tests for `internal/marketstate`** indicator maths against fixtures.
-6. **Forward-fill tool** (`cmd/fill`): read a JSONL day, join each record to the
-   price 10s/60s/300s later, write the enriched file. Needed for phase 3.
-7. **Calibration analysis** (`cmd/calib` or a notebook): bucket by `confidence`,
-   plot realised accuracy per bucket. This is the headline chart of the writeup.
-8. **`internal/exec/paper.go`** — does not exist yet. Phase 4.
+Done since the skeleton:
 
----
+- ~~Verify the bitbank stream contract against live data~~ →
+  [docs/stream-verification.md](docs/stream-verification.md), and `cmd/dump` to
+  re-check it.
+- ~~`go.sum` / dependency fetch~~ → `gorilla/websocket` only, as expected.
+- ~~Sequence handling on the depth book~~ → buffer-and-replay, see above. It is
+  not gap detection; the ids are not consecutive.
+- ~~Unit tests for `internal/decide`~~ → every gate, table-driven, plus the
+  ordering property that brakes beat accelerators.
+- ~~Unit tests for `internal/marketstate`~~ → sequencing, bar continuity,
+  indicator maths, and a golden test on the state text.
+- ~~Forward-fill tool~~ → `cmd/fill`.
+- ~~Calibration analysis~~ → `cmd/calib`.
+
+Next, in order:
+
+1. **Run phase 1 for an hour and read the state text.** The renderer has been
+   checked against live data for minutes, not hours. Watch for: reconnect
+   behaviour, the book going unsynced, a pair going quiet for long enough that
+   the carried-forward series says something silly.
+2. **Run phase 2 for several days.** This is the whole point. It needs no
+   execution code. Pin `-model` to a version and leave it alone for the run.
+3. **Then, and only then, phase 3.** `cmd/fill` and `cmd/calib` are written but
+   have only ever seen synthetic input. Expect to find that some question has no
+   usable ground truth and needs rethinking — that is the phase 3 deliverable.
+4. **`internal/exec/paper.go`** — phase 4. Do not start it early.
 
 ## Things deliberately not built
 
@@ -269,3 +326,6 @@ answers the interesting question. Resist building the executor early.
 - Numbers in logs and state text are in **bps** or **percent**, labelled. Never
   emit a bare ratio.
 - Times are UTC in logs and records; the state text also uses UTC.
+- `make check` (vet, gofmt, `go test -race ./...`) must pass before a commit.
+  `internal/decide`, `internal/marketstate` and `internal/calib` are pure and
+  have no excuse for being untested.

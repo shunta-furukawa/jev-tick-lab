@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      # vet, gofmt and the race detector — the same thing `make check` runs
+      # locally. internal/decide, internal/marketstate and internal/calib are
+      # pure, so a red build here means a real regression, not a flake.
+      - run: make check

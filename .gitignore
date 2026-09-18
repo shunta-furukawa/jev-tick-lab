@@ -3,3 +3,9 @@ data/
 *.jsonl
 .env
 *.key
+
+# `go build ./cmd/x` drops the binary in the working directory.
+/bot
+/dump
+/fill
+/calib
