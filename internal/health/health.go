@@ -88,6 +88,11 @@ type Report struct {
 	LongestGapS string        `json:"longest_gap"`
 	MissingSec  float64       `json:"missing_sec"`
 
+	// Distinct runs seen in the window. More than one means the collector
+	// restarted, which a short gap alone does not reveal — and a restart can
+	// land on different code, changing the state text mid-dataset.
+	RunIDs []string `json:"run_ids"`
+
 	ModelVersions []string `json:"model_versions"`
 	LatencyP50    float64  `json:"latency_p50_ms"`
 	LatencyP99    float64  `json:"latency_p99_ms"`
@@ -129,6 +134,7 @@ func Check(records []obs.Record, now time.Time, window time.Duration, t Threshol
 	var (
 		inWindow []obs.Record
 		models   = map[string]bool{}
+		runs     = map[string]bool{}
 		latency  []float64
 	)
 	for _, rec := range records {
@@ -188,6 +194,9 @@ func Check(records []obs.Record, now time.Time, window time.Duration, t Threshol
 	}
 
 	for _, rec := range inWindow {
+		if rec.RunID != "" {
+			runs[rec.RunID] = true
+		}
 		if rec.Error != "" {
 			rep.Errors++
 		} else {
@@ -217,6 +226,11 @@ func Check(records []obs.Record, now time.Time, window time.Duration, t Threshol
 		rep.ModelVersions = append(rep.ModelVersions, m)
 	}
 	sort.Strings(rep.ModelVersions)
+
+	for r := range runs {
+		rep.RunIDs = append(rep.RunIDs, r)
+	}
+	sort.Strings(rep.RunIDs)
 
 	if len(latency) > 0 {
 		rep.LatencyP50 = calib.Percentile(append([]float64(nil), latency...), 50)
@@ -268,6 +282,13 @@ func problems(r Report, t Thresholds) []string {
 	if t.MaxGap > 0 && r.LongestGap > t.MaxGap {
 		out = append(out, fmt.Sprintf("longest hole in the series is %s (limit %s)", r.LongestGap, t.MaxGap))
 	}
+	// A restart or two in an hour is somebody deploying. Four is a process that
+	// cannot stay up, and the gap check will not say so because each restart
+	// only costs a few seconds.
+	if len(r.RunIDs) >= 4 {
+		out = append(out, fmt.Sprintf("the collector restarted %d times in this window; it is not staying up", len(r.RunIDs)-1))
+	}
+
 	// Rule 5: a moved model invalidates every tuned threshold, so a run that
 	// spans two versions is not one run.
 	if len(r.ModelVersions) > 1 {

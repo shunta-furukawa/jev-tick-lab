@@ -139,11 +139,14 @@ one bar long rendered as "Return 300s: +0.000%, 5m high == 5m low, volatility
 xrp_jpy book at `anomalous` 0.54 against a 0.30 gate for exactly that reason.
 Windows longer than the series now say how much history they are missing.
 
-Measured latency is 535ms against a 3s cadence, so there is room. Had it
-exceeded `Thresholds.MaxDecisionAge` (2s) the run would have collected answers
-and produced no decisions at all — every record gated `decision_age`.
-`cmd/preflight` measures it and says so, which is why it runs before the
-collection rather than after.
+Measured latency in a live shadow run is **p50 232ms, p99 748ms** against a 3s
+cadence — eight times the headroom `MaxDecisionAge` (2s) needs. `cmd/preflight`
+reports a higher number, around 550ms, because it makes one cold call including
+the TLS handshake while the bot reuses its connection. Treat preflight's figure
+as the pessimistic bound it is.
+
+Had latency exceeded `MaxDecisionAge` the run would have collected answers and
+produced no decisions at all — every record gated `decision_age`.
 
 **Decision freshness is bounded.** `Thresholds.MaxDecisionAge` (2s). Anything
 older is discarded rather than acted on.
@@ -183,8 +186,16 @@ rather than a string match. Treat it like a question id: append, never rename.
 
 **Everything is logged, including failures.** A failed call writes a record with
 `error` set. Gaps in the log are themselves data. Each run also writes one row
-to `runs-YYYY-MM-DD.jsonl` with its thresholds, question set and hash, so a tick
-recorded months ago is still interpretable.
+to `runs-YYYY-MM-DD.jsonl` with its thresholds, question set and hash, **and the
+VCS revision it was built from**, so a tick recorded months ago is still
+interpretable.
+
+The revision is there because a restart onto different code is otherwise
+invisible. The question-set hash catches a changed question; nothing caught a
+changed renderer, and the state text is the biggest lever on answer quality
+there is. `go build` stamps the revision automatically; `go run` does not, so a
+local run records `unknown (go run)` rather than an empty field that could be
+mistaken for a missing one.
 
 **Health is a property of the data, not of the process.** systemd restarts a
 dead bot. It cannot see the failure that actually costs this experiment its
@@ -247,7 +258,8 @@ A 1s cadence uses 60 rpm. TypeSafe warns these limits move without notice.
 
 | | |
 |---|---|
-| latency | **561ms** — inside `MaxDecisionAge` (2s), the 3s tick and the 3s timeout |
+| latency, one-shot | **561ms** — a cold call, TLS handshake included |
+| latency, steady state | **p50 232ms, p99 748ms** — measured in a live shadow run, where the HTTP connection is reused |
 | tokens | **1,926 in, 229 out** for a 1,330-byte state |
 | cost | **$0.000081/call — $2.33/day at 3s** |
 

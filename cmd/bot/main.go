@@ -102,7 +102,11 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 		defer logger.Close()
 
 		// The run header is what makes a logged tick interpretable months
-		// later: which thresholds, which question set, which model was asked.
+		// later: which thresholds, which question set, which model was asked,
+		// and which build produced the state text they were asked about.
+		revision, buildTime, modified := obs.BuildInfo()
+		log.Info("build", "revision", revision, "modified", modified)
+
 		if err := logger.WriteRun(obs.Run{
 			RunID:          runID,
 			StartedAt:      started,
@@ -110,6 +114,9 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 			Mode:           mode,
 			ModelRequested: model,
 			TickInterval:   tick.String(),
+			BuildRevision:  revision,
+			BuildTime:      buildTime,
+			BuildModified:  modified,
 			Thresholds:     thresholds,
 			QuestionIDs:    jev.IDs(questions),
 			QuestionsHash:  obs.HashQuestions(questions),

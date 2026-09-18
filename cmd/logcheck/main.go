@@ -144,6 +144,11 @@ func emitText(rep health.Report) {
 	fmt.Printf("  halted market  %d\n", rep.Halted)
 	fmt.Printf("  holes          %d, longest %s, %.0fs missing\n", rep.Gaps, rep.LongestGapS, rep.MissingSec)
 	fmt.Printf("  model          %v\n", rep.ModelVersions)
+	if len(rep.RunIDs) > 1 {
+		// Not a failure on its own, but it means the state text may have
+		// changed mid-window: check build_revision in runs-*.jsonl.
+		fmt.Printf("  runs           %d — the collector restarted; check build_revision in runs-*.jsonl\n", len(rep.RunIDs))
+	}
 	fmt.Printf("  latency ms     p50 %.0f  p99 %.0f\n", rep.LatencyP50, rep.LatencyP99)
 
 	if !rep.OK() {

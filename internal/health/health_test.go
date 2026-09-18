@@ -1,6 +1,7 @@
 package health
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -339,5 +340,41 @@ func TestAStaleLogSaysTheCollectorStopped(t *testing.T) {
 	}
 	if got := now.Sub(rep.NewestOverall); got < 4*time.Hour {
 		t.Errorf("newest overall is %s old, want about 5h", got)
+	}
+}
+
+// A restart is invisible to the gap check when it is quick, and it can land on
+// different code — which changes the state text mid-dataset.
+func TestRestartsAreReported(t *testing.T) {
+	t.Parallel()
+	records := series(3600, func(i int, r *obs.Record) {
+		r.RunID = "run-a"
+		if i > 1800 {
+			r.RunID = "run-b"
+		}
+	})
+
+	rep := Check(records, now, hour(), DefaultThresholds())
+	if len(rep.RunIDs) != 2 {
+		t.Fatalf("run ids = %v, want two", rep.RunIDs)
+	}
+	// One deploy is not a fault.
+	if !rep.OK() {
+		t.Errorf("a single restart was reported as a failure: %v", rep.Problems)
+	}
+}
+
+func TestACrashLoopIsAFailure(t *testing.T) {
+	t.Parallel()
+	records := series(3600, func(i int, r *obs.Record) {
+		r.RunID = fmt.Sprintf("run-%d", i/600) // six runs in the hour
+	})
+
+	rep := Check(records, now, hour(), DefaultThresholds())
+	if rep.OK() {
+		t.Fatal("six restarts in an hour was reported healthy")
+	}
+	if !containsMatch(rep.Problems, "not staying up") {
+		t.Errorf("problems = %v", rep.Problems)
 	}
 }

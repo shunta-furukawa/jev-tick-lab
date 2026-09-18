@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -70,16 +71,52 @@ type Record struct {
 // that the tick schema stays uniform for a BigQuery autodetect load while the
 // configuration that produced those ticks is still recoverable.
 type Run struct {
-	RunID          string                  `json:"run_id"`
-	StartedAt      time.Time               `json:"started_at"`
-	Pair           string                  `json:"pair"`
-	Mode           string                  `json:"mode"`
-	ModelRequested string                  `json:"model_requested"`
-	TickInterval   string                  `json:"tick_interval"`
-	Thresholds     decide.Thresholds       `json:"thresholds"`
-	QuestionIDs    []string                `json:"question_ids"`
-	QuestionsHash  string                  `json:"questions_hash"`
-	Questions      map[string]jev.Question `json:"questions"`
+	RunID          string    `json:"run_id"`
+	StartedAt      time.Time `json:"started_at"`
+	Pair           string    `json:"pair"`
+	Mode           string    `json:"mode"`
+	ModelRequested string    `json:"model_requested"`
+	TickInterval   string    `json:"tick_interval"`
+
+	// What was running. A restart onto different code is otherwise invisible:
+	// the question-set hash catches a changed question, but nothing catches a
+	// changed renderer — and the state text is the biggest lever on answer
+	// quality there is. Populated from the build's VCS stamp, which `go build`
+	// provides and `go run` does not.
+	BuildRevision string `json:"build_revision"`
+	BuildTime     string `json:"build_time"`
+	BuildModified bool   `json:"build_modified"`
+
+	Thresholds    decide.Thresholds       `json:"thresholds"`
+	QuestionIDs   []string                `json:"question_ids"`
+	QuestionsHash string                  `json:"questions_hash"`
+	Questions     map[string]jev.Question `json:"questions"`
+}
+
+// BuildInfo reports the revision this binary was built from.
+//
+// `go build` stamps it automatically; `go run` does not, so a local run records
+// "unknown (go run)" rather than an empty string that could be mistaken for a
+// missing field.
+func BuildInfo() (revision, buildTime string, modified bool) {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown (no build info)", "", false
+	}
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.time":
+			buildTime = s.Value
+		case "vcs.modified":
+			modified = s.Value == "true"
+		}
+	}
+	if revision == "" {
+		return "unknown (go run)", "", false
+	}
+	return revision, buildTime, modified
 }
 
 // NewRunID is a sortable, human-readable id: a run is identified by when it
