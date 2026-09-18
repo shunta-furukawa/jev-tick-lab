@@ -447,10 +447,11 @@ means it typechecks, has tests against a fake, and has never met production.
 | state text read against live data for an hour | ✅ 1,319 states checked structurally and by eye; found the `Return 300s` bug |
 | systemd units | ⚠️ `systemd-analyze verify` passes; never started on a real VM |
 | TypeSafe accepts this question set | ✅ **called 2026-09-18.** All nine answered, shapes as documented, pinned version answered |
-| model latency | ✅ **561ms**, two samples from Japan. Inside `MaxDecisionAge` |
+| model latency | ✅ **p50 229ms, p99 788ms** over a live run. Preflight's ~550ms is a cold-call bound |
 | input tokens, so the cost figures | ✅ **1,926** measured against a production-shaped state |
 | thresholds are re-derivable offline | ✅ tested — a logged record re-scores exactly under any threshold set |
-| `decide` against real answers | ⚠️ two samples. Both would trip the anomaly gate — see below |
+| the shadow path end to end | ✅ 195 records over 10 min: 100% tick density, zero failed calls, zero holes, logcheck HEALTHY |
+| `decide` against real answers | ⚠️ runs clean, but the anomaly gate's threshold is still unexamined — see below |
 | `cmd/fill`, `cmd/calib` | ❌ synthetic input only |
 | Terraform | ❌ never applied to a project |
 | `deploy/deploy.sh` | ❌ syntax checked only |
@@ -469,11 +470,9 @@ on a laptop and costs under a dollar; only then is it worth building a VM.
    defect that `-min-history` and the renderer now fix. Worth one more call from
    the VM once it exists, to measure latency on the path that will actually run.
 
-2. **A short local shadow run.** Half an hour of
-   `go run ./cmd/bot -mode shadow -tick 3s -log-dir ./data`, then
-   `make logcheck -- -tick 3s`. About $0.04. This is the first time the record schema, the
-   gates, the logger and the health check meet real answers, and it is much
-   cheaper to find a problem here than on a VM three days in.
+2. ~~A short local shadow run~~ — **done 2026-09-18.** 195 records, 100% tick
+   density, zero failed calls, logcheck HEALTHY. The record schema, the gates,
+   the logger and the health check have now met real answers.
 
 3. **`terraform apply`, then seed the secret.** See
    [docs/operations.md](docs/operations.md). Nothing here has been applied to a
