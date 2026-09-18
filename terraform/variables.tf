@@ -89,3 +89,15 @@ variable "ssh_source_ranges" {
   type        = list(string)
   default     = ["35.235.240.0/20"]
 }
+
+variable "alert_email" {
+  description = <<-EOT
+    Where to send the "collection has stopped" mail. Leave empty to create no
+    alerting at all.
+
+    Phase 2 is a multi-day unattended run. Without this, the failure mode is
+    discovering in phase 3 that Tuesday is missing.
+  EOT
+  type        = string
+  default     = ""
+}

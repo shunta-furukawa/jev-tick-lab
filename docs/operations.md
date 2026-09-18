@@ -168,6 +168,30 @@ ticks are still data, and `decide` already stands aside during one.
 
 ---
 
+## Alerting
+
+Set `alert_email` in `terraform.tfvars` and the apply also creates two policies:
+
+- **collection degraded** — logcheck ran and said the last hour is unusable.
+- **no health report** — nothing has reported for three hours. This is the one
+  that matters. A log-match alert cannot fire when the problem is that no logs
+  arrive, so this watches a log-based counter for absence instead, and catches
+  the VM being gone, wedged, or never booted.
+
+The filters are full-text matches rather than `jsonPayload` field lookups,
+because the ops agent forwards the journal line as text unless it has been
+configured to parse it, and a filter that silently matches nothing is worse than
+no alert at all. **Confirm they match after the first hour:**
+
+```bash
+gcloud logging read '"\"msg\":\"logcheck\""' --limit 5 --freshness 2h
+```
+
+If that returns nothing while logcheck is clearly running, fix the filter in
+`terraform/alerts.tf` before trusting the silence.
+
+---
+
 ## Getting the data out
 
 Shipping is hourly and automatic. To load a day into BigQuery for analysis:
