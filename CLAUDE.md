@@ -108,6 +108,7 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `internal/obs` | JSONL records, rotation | Any blocking work in the hot path |
 | `internal/exec` | Fill simulation, order placement | Reading Jev answers directly — it consumes `decide.Signal` only |
 | `internal/calib` | Reliability bins, Brier, ECE, outcome definitions | Any I/O; `cmd/calib` reads the files |
+| `internal/health` | Whether a running collection is still producing usable data | Any I/O; `cmd/logcheck` reads the files and picks the exit code |
 
 | Command | Does |
 |---|---|
@@ -115,6 +116,7 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `cmd/dump` | Prints raw stream frames. Does not import `internal/stream`, so it shows the wire rather than our reading of it |
 | `cmd/fill` | Forward-fill: joins each logged tick to the price 10s/60s/300s later |
 | `cmd/calib` | The calibration report: stated probability against realised frequency |
+| `cmd/logcheck` | Hourly health verdict on the collection. Exit 0 healthy, 1 degraded, 2 could not tell |
 
 ### Key design decisions and why
 
@@ -150,6 +152,13 @@ rather than a string match. Treat it like a question id: append, never rename.
 `error` set. Gaps in the log are themselves data. Each run also writes one row
 to `runs-YYYY-MM-DD.jsonl` with its thresholds, question set and hash, so a tick
 recorded months ago is still interpretable.
+
+**Health is a property of the data, not of the process.** systemd restarts a
+dead bot. It cannot see the failure that actually costs this experiment its
+deliverable: a bot that is alive, writing a record every second, and writing
+records nobody can analyse — evaluated against a book that never re-synced, or
+against a model version that moved halfway through the run. `cmd/logcheck` runs
+hourly and fails on that. See [docs/operations.md](docs/operations.md).
 
 ---
 
@@ -259,6 +268,29 @@ hardcoded constants, because the rebate campaign can end.
 
 ---
 
+## Infrastructure
+
+`terraform/` builds the machine and its surroundings; `deploy/deploy.sh` puts
+code on it. They are separate so that a code deploy can never touch the bucket
+holding collected data, and a VM rebuild never needs a code change.
+
+The runbook is [docs/operations.md](docs/operations.md). Three things about it
+are load-bearing:
+
+- **The API key never touches the disk.** `deploy/run.sh` fetches it from Secret
+  Manager into the process environment and `exec`s the bot. Not an
+  `EnvironmentFile`, not the image, not Terraform state. An earlier version of
+  the README claimed this while the unit read a plaintext file; the claim is now
+  true.
+- **Terraform manages the secret container, never its value.** A secret version
+  in Terraform is a secret in the state file.
+- **The bucket and dataset survive `terraform destroy`.** The tick logs are the
+  deliverable; `force_destroy` stays false.
+
+None of it has been applied against a real project yet.
+
+---
+
 ## Phases
 
 Do not skip ahead. Each phase gates the next.
@@ -292,6 +324,9 @@ Done since the skeleton:
   indicator maths, and a golden test on the state text.
 - ~~Forward-fill tool~~ → `cmd/fill`.
 - ~~Calibration analysis~~ → `cmd/calib`.
+
+- ~~Somewhere to actually run it~~ → `terraform/`, `deploy/`, and
+  `cmd/logcheck` for the hourly verdict. Not yet applied to a real project.
 
 Next, in order:
 

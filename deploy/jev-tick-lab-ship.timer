@@ -1,0 +1,11 @@
+[Unit]
+Description=jev-tick-lab - hourly log shipping
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+# Spread the upload a little so every VM in a fleet does not start at :00.
+RandomizedDelaySec=2m
+
+[Install]
+WantedBy=timers.target

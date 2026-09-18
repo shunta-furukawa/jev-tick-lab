@@ -1,0 +1,20 @@
+[Unit]
+Description=jev-tick-lab - is the collection still producing usable data?
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=jevbot
+Group=jevbot
+EnvironmentFile=/etc/jev-tick-lab/config
+
+# Exit 1 means the last hour of data is degraded, which fails the unit and is
+# what Cloud Logging alerts on. Exit 2 means it could not tell (no log file at
+# all), which is also not a healthy run.
+#
+# -json so the ops agent forwards structured fields and a severity rather than
+# a wall of text.
+ExecStart=/opt/jev-tick-lab/logcheck -dir ${JEV_LOG_DIR} -window 1h -json
+
+StandardOutput=journal
+StandardError=journal

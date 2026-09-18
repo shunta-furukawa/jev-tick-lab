@@ -74,44 +74,47 @@ At roughly 1,500 input tokens per call and $0.042 per million input tokens, one
 second of evaluation costs about $0.000063. Eight hours a day is **under
 $2/day**. Output tokens are not billed.
 
-## Infrastructure
+## Running it somewhere
 
 A persistent WebSocket connection with in-memory state is a poor fit for
-anything serverless. Use a small always-on VM.
-
-```
-GCE e2-micro or e2-small, asia-northeast1  (bitbank is domestic; keep the hop short)
-├── systemd unit with Restart=always         → deploy/jev-tick-lab.service
-├── TYPESAFE_API_KEY from Secret Manager     → fetched at start, never on disk
-├── JSONL logs to local disk                 → daily sync to GCS
-└── GCS → BigQuery for the calibration analysis
-```
-
-At one record per second a full day is about 29,000 rows, so a nightly batch
-load is plenty — no streaming inserts needed.
-
-### Deploy
+anything serverless. It wants a small always-on VM, and phase 2 wants several
+days of uninterrupted collection from it.
 
 ```bash
-make build-linux
-gcloud compute scp bin/bot jevbot-vm:~/ --zone asia-northeast1-b
-gcloud compute scp deploy/jev-tick-lab.service jevbot-vm:~/ --zone asia-northeast1-b
+cd terraform
+cp terraform.tfvars.example terraform.tfvars   # fill in project_id
+terraform apply
 
-# on the VM
-sudo mv jev-tick-lab.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now jev-tick-lab
-journalctl -u jev-tick-lab -f
+printf %s "$TYPESAFE_API_KEY" | \
+  gcloud secrets versions add jev-tick-lab-typesafe-api-key --data-file=-
+
+./deploy/deploy.sh YOUR_PROJECT
 ```
 
-### Log shipping
+`terraform/` builds an e2-small in `asia-northeast1` (bitbank is domestic; keep
+the hop short) inside a VPC whose only ingress is SSH through IAP, plus the log
+bucket, a BigQuery dataset and an empty Secret Manager container.
+`deploy/deploy.sh` puts the binaries and the systemd units on it — and refuses
+to ship a build that does not pass `make check`.
+
+The key is fetched from Secret Manager at start-up into the process environment
+and never written to disk. Logs ship to GCS hourly.
+
+**None of this has been applied to a real project yet.** The full runbook,
+including what to do when the health check goes red, is in
+[docs/operations.md](docs/operations.md).
+
+### Knowing whether the run is still worth anything
 
 ```bash
-# cron, daily
-gsutil -m rsync -r /opt/jev-tick-lab/data gs://YOUR_BUCKET/jev-tick-lab/
-bq load --source_format=NEWLINE_DELIMITED_JSON --autodetect \
-  jevbot.ticks gs://YOUR_BUCKET/jev-tick-lab/ticks-*.jsonl
+go run ./cmd/logcheck -dir ./data -window 1h
 ```
+
+systemd restarts a dead bot. It cannot see a bot that is alive, writing a record
+every second, and writing records nobody can analyse — because the book never
+re-synced after a reconnect, or because the pinned model version moved halfway
+through the run. `logcheck` runs hourly on the VM and fails the unit on exactly
+that, so it surfaces in Cloud Logging instead of in phase 3, a week too late.
 
 ## Layout
 
@@ -126,9 +129,12 @@ internal/jev/         TypeSafe client and the question set
 internal/decide/      thresholds and signal composition — all weights live here
 internal/obs/         JSONL tick logger
 internal/calib/       reliability bins, Brier, ECE
+internal/health/      is the collection still producing usable data?
 internal/exec/        fill simulation (phase 4, not implemented)
-deploy/               systemd unit
-docs/                 stream verification record
+cmd/logcheck/         hourly health verdict, exit code is the interface
+terraform/            the VM and its surroundings
+deploy/               systemd units, secret fetch, log shipping, deploy script
+docs/                 stream verification record, operations runbook
 ```
 
 ## Development

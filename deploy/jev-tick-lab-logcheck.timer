@@ -1,0 +1,12 @@
+[Unit]
+Description=jev-tick-lab - hourly data quality check
+
+[Timer]
+# Hourly, a few minutes in, so a check never races the top-of-hour shipper.
+OnCalendar=*-*-* *:07:00
+# Catch up after a reboot rather than silently skipping the window.
+Persistent=true
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

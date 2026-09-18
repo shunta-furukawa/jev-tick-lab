@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and fill in. Everything else has a default.
+project_id = "your-gcp-project"
+
+# Defaults worth knowing about:
+# region       = "asia-northeast1"
+# zone         = "asia-northeast1-b"
+# machine_type = "e2-small"
+# pair         = "xrp_jpy"
+# model        = "jev-1.13.0"   # pinned, never an alias
+# mode         = "shadow"

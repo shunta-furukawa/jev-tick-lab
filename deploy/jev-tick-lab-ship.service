@@ -1,0 +1,18 @@
+[Unit]
+Description=jev-tick-lab - copy tick logs to GCS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jevbot
+Group=jevbot
+EnvironmentFile=/etc/jev-tick-lab/config
+ExecStart=/opt/jev-tick-lab/ship-logs.sh
+
+# gcloud needs somewhere to put its config and cache.
+PrivateTmp=true
+Environment=CLOUDSDK_CONFIG=/tmp/gcloud
+
+StandardOutput=journal
+StandardError=journal

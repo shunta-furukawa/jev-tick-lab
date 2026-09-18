@@ -1,4 +1,4 @@
-.PHONY: build build-linux run-observe run-shadow dump check test race vet fmt fmt-check tidy clean
+.PHONY: build build-linux build-all run-observe run-shadow dump logcheck check test race vet fmt fmt-check tidy clean deploy
 
 build:
 	go build -o bin/bot ./cmd/bot
@@ -18,6 +18,14 @@ run-shadow:
 # Raw frames from the exchange, for re-checking the stream contract.
 dump:
 	go run ./cmd/dump -pair xrp_jpy -for 20s
+
+# Is the collection still producing a usable dataset?
+logcheck:
+	go run ./cmd/logcheck -dir ./data -window 1h
+
+# Ships binaries and units to the provisioned VM. See docs/operations.md.
+deploy:
+	./deploy/deploy.sh $(PROJECT)
 
 # What must pass before a commit.
 check: vet fmt-check race

@@ -3,19 +3,26 @@ Description=jev-tick-lab - Jev day-trading reproduction experiment
 After=network-online.target
 Wants=network-online.target
 
+# No start-rate limiting on purpose. A network blip at 3am must not leave the
+# unit sitting in failed state until somebody notices; a genuinely broken
+# configuration is caught by logcheck, which fails on "no records" rather than
+# on "process not running".
+StartLimitIntervalSec=0
+
 [Service]
 Type=simple
 User=jevbot
+Group=jevbot
 WorkingDirectory=/opt/jev-tick-lab
 
-# Secrets come from the environment only. Populate this file at boot from
-# Secret Manager; never bake a key into the image or commit one.
-EnvironmentFile=/etc/jev-tick-lab/env
-
-ExecStart=/opt/jev-tick-lab/bot -pair xrp_jpy -mode shadow -model jev-1.13.0 -log-dir /opt/jev-tick-lab/data
+# Non-secret settings only: pair, model, mode, paths. The TypeSafe key is NOT
+# here and must never be. run.sh fetches it from Secret Manager into this
+# process's environment and execs the bot, so the key never touches the disk.
+EnvironmentFile=/etc/jev-tick-lab/config
+ExecStart=/opt/jev-tick-lab/run.sh
 
 Restart=always
-RestartSec=5
+RestartSec=10
 
 # SIGTERM lets the tick loop finish and flush the log. In live mode this window
 # is also where positions must be flattened, so do not shorten it.
@@ -24,7 +31,15 @@ TimeoutStopSec=30
 
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
 ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+# AF_NETLINK is not optional here: glibc's resolver enumerates interfaces over
+# netlink, so dropping it can turn DNS into an intermittent failure that looks
+# like the exchange going away.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 ReadWritePaths=/opt/jev-tick-lab/data
 
 StandardOutput=journal

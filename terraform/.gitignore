@@ -1,0 +1,8 @@
+# State holds resource attributes and must never be committed.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Holds the project id, and whatever else gets added later.
+terraform.tfvars
