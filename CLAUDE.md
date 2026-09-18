@@ -410,19 +410,41 @@ comes before the long run.
 
 ## Next, in order
 
+Ordered by what it costs to find out you are wrong. Everything up to step 3 runs
+on a laptop and costs under a dollar; only then is it worth building a VM.
+
 1. **Finish phase 1.** An hour of `-mode observe -print-state`, actually read.
-   No API key, no cost, and it is the outstanding half of the criterion.
-2. **`terraform apply`, then seed the secret.** See
-   [docs/operations.md](docs/operations.md). Nothing here has been applied, so
-   budget for fixing something on the first attempt.
-3. **`cmd/preflight`.** One real call. It settles the API contract, the latency
-   and the token cost in one shot, and its exit code says whether to proceed.
-4. **Phase 2 for several days.** The whole point, and it needs no execution
-   code. Pin `-model` and leave it alone. Watch the hourly logcheck verdict.
-5. **Phase 3.** Expect to find that some question has no usable ground truth.
+   No API key, no GCP, no cost, and it is the outstanding half of the criterion.
+
+2. **`make preflight`, locally.** The moment a TypeSafe key exists. One call,
+   about $0.00006, and it settles all four bold rows above: whether the API
+   accepts this question set, the real latency, the real token count, and
+   therefore every cost figure here. Its exit code says whether to go on.
+
+   In particular it answers a question that decides the shape of the run: if
+   latency exceeds `MaxDecisionAge` (2s), every signal is gated stale and the
+   collection produces answers with no decisions attached. Better to learn that
+   from one call than from a day of records.
+
+3. **A short local shadow run.** Half an hour of
+   `go run ./cmd/bot -mode shadow -tick 3s -log-dir ./data`, then
+   `make logcheck`. About $0.04. This is the first time the record schema, the
+   gates, the logger and the health check meet real answers, and it is much
+   cheaper to find a problem here than on a VM three days in.
+
+4. **`terraform apply`, then seed the secret.** See
+   [docs/operations.md](docs/operations.md). Nothing here has been applied to a
+   real project, so budget for fixing something on the first attempt.
+
+5. **Deploy and run phase 2 for several days.** The whole point, and it needs no
+   execution code. Pin `-model` and leave it alone. Watch the hourly logcheck
+   verdict rather than the tick log.
+
+6. **Phase 3.** Expect to find that some question has no usable ground truth.
    Start with `book_pressure`: phase 1 measured the book as bid-heavy 70% of the
    time, so its base rate may be structural rather than informative.
-6. **`internal/exec/paper.go`** — phase 4, and the point at which the region
+
+7. **`internal/exec/paper.go`** — phase 4, and the point at which the region
    decision above needs revisiting. Do not start it early.
 
 ## Things deliberately not built

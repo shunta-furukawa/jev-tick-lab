@@ -106,6 +106,11 @@ printf %s "$TYPESAFE_API_KEY" | \
 
 ### 4. Pre-flight the API
 
+> **Cheaper still: run this on your laptop before step 2.** It needs a TypeSafe
+> key and nothing else — no project, no VM, no Terraform. If the API does not
+> accept this question set, or answers more slowly than `MaxDecisionAge`, you
+> want to know that before building anything to run it on.
+
 **Do this before any collection longer than a few minutes.** Nothing in this
 repository had ever talked to the real TypeSafe API: `internal/jev` is tested
 against a local fake, and `jev.Validate` only checks the question set's shape
