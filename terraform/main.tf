@@ -135,7 +135,7 @@ resource "google_compute_instance" "bot" {
     initialize_params {
       image = "debian-cloud/debian-12"
       size  = var.disk_gb
-      type  = "pd-balanced"
+      type  = var.disk_type
     }
   }
 

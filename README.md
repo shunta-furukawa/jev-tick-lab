@@ -71,8 +71,18 @@ way — see [docs/stream-verification.md](docs/stream-verification.md).
 ## Cost
 
 At roughly 1,500 input tokens per call and $0.042 per million input tokens, one
-second of evaluation costs about $0.000063. Eight hours a day is **under
-$2/day**. Output tokens are not billed.
+second of evaluation costs about $0.000063. Output tokens are not billed. So
+continuous collection is **$5.44/day**, and eight hours a day is under $2.
+
+The VM it runs on is **$0.44/day** — an e2-micro in `asia-northeast1` with a
+20GB disk and an external IP, at September 2026 list prices. That is about 8% of
+the total: the length of the run is what costs money, not the machine.
+
+A five-day phase 2 collection is therefore around **$29** all in. Phase 1 makes
+no model calls at all, so `-mode observe` costs only the VM.
+
+Full breakdown, including how to stop paying between runs, in
+[docs/operations.md](docs/operations.md#cost).
 
 ## Running it somewhere
 

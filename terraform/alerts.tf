@@ -103,3 +103,44 @@ resource "google_monitoring_alert_policy" "silent" {
 
   notification_channels = [google_monitoring_notification_channel.email[0].id]
 }
+
+# --- spend -------------------------------------------------------------------
+#
+# A budget cannot stop anything; it only tells you. That is still the single
+# most useful cost control on a personal project, because the failure mode is
+# not a spike, it is forgetting the thing is on.
+
+resource "google_billing_budget" "monthly" {
+  count           = var.billing_account != "" ? 1 : 0
+  billing_account = var.billing_account
+  display_name    = "${var.name} monthly"
+
+  budget_filter {
+    projects = ["projects/${var.project_id}"]
+  }
+
+  amount {
+    specified_amount {
+      currency_code = "USD"
+      units         = tostring(var.budget_usd)
+    }
+  }
+
+  threshold_rules {
+    threshold_percent = 0.5
+  }
+  threshold_rules {
+    threshold_percent = 0.9
+  }
+  threshold_rules {
+    threshold_percent = 1.0
+  }
+
+  dynamic "all_updates_rule" {
+    for_each = local.alerting == 1 ? [1] : []
+    content {
+      monitoring_notification_channels = [google_monitoring_notification_channel.email[0].id]
+      disable_default_iam_recipients   = true
+    }
+  }
+}

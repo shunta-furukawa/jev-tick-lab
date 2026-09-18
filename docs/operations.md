@@ -234,23 +234,79 @@ thresholds, all of which are recorded in `runs-YYYY-MM-DD.jsonl` at start-up.
 
 ## Cost
 
-Roughly, in `asia-northeast1`, per month:
+List prices, `asia-northeast1`, checked September 2026. E2 machine types get no
+sustained-use discount, so the sticker price is what you pay.
 
-| item | approx |
-|---|---|
-| e2-small, always on | $15 |
-| 20GB pd-balanced | $2 |
-| ephemeral external IP | $3 |
-| GCS standard, a few GB | under $1 |
-| Jev calls, 8h/day | under $60 |
+### The machine
 
-The external IP is there for egress only. Cloud NAT would be the alternative and
-costs several times more than the VM it protects, with nothing listening on this
-host either way.
+| item | rate | per month |
+|---|---|---|
+| e2-micro (default) | $0.0107/hr | **$7.84** |
+| 20GB pd-balanced | $0.13/GB | **$2.60** |
+| external IPv4, attached to a running VM | $0.004/hr | **$2.92** |
+| GCS standard, a month of ticks (~2.7GB) | | **under $0.10** |
+| | | **≈ $13.40/month, or $0.44/day** |
 
-e2-micro halves the compute line. Check the skipped-tick count in `logcheck`
-first — the tick loop is latency-sensitive and e2-micro's 0.25 vCPU baseline can
-throttle exactly when a burst of depth diffs arrives.
+Swaps, if it matters: e2-small is $15.69 instead of $7.84; pd-standard is $1.04
+instead of $2.60 for the same 20GB.
+
+### The model calls, which are the actual bill
+
+Using this repository's own figures — ~1,500 input tokens per call at $0.042 per
+million, output not billed:
+
+| cadence | per day | per month |
+|---|---|---|
+| 1 call/sec, 24h | **$5.44** | $163 |
+| 1 call/sec, 8h | $1.81 | $54 |
+| 1 call/2sec, 24h | $2.72 | $82 |
+
+**The VM is about 8% of the cost of running this.** Optimising the machine type
+is not where the money is; the length of the run is.
+
+### What a phase 2 run actually costs
+
+The exit criterion is "several days of clean tick logs", not a month. Five days
+of continuous shadow collection:
+
+```
+infrastructure   5 × $0.44  =  $2.20
+model calls      5 × $5.44  = $27.20
+                              -------
+                              ≈ $29
+```
+
+Phase 1 is free of model calls entirely — `-mode observe` never calls TypeSafe,
+so an hour, or a day, of stream verification costs only the VM.
+
+### Between runs
+
+Stop the VM. A stopped instance bills nothing for compute, and an ephemeral
+external IP is released when it stops, so the standing cost falls to the disk
+alone — $2.60/month for 20GB pd-balanced.
+
+```bash
+gcloud compute instances stop jev-tick-lab --zone asia-northeast1-b
+gcloud compute instances start jev-tick-lab --zone asia-northeast1-b
+```
+
+The collector comes back on boot (`Restart=always` plus the unit being enabled),
+re-seeds the book from the first `depth_whole`, and carries on. It is a new run
+in every sense that matters, so it writes a new row to `runs-YYYY-MM-DD.jsonl`.
+
+### A budget you will actually notice
+
+Nothing here can run away — the cost is flat and predictable. The realistic
+failure is forgetting it is on. Set `billing_account` and `alert_email` in
+`terraform.tfvars` and the apply creates a budget that mails you at 50%, 90% and
+100% of `budget_usd`.
+
+```bash
+gcloud billing accounts list    # for the id
+```
+
+A budget alerts; it does not stop anything. Stopping is still the `instances
+stop` above.
 
 ---
 

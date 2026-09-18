@@ -22,21 +22,37 @@ variable "name" {
 
 variable "machine_type" {
   description = <<-EOT
-    e2-small rather than e2-micro on purpose. The workload is tiny, but the tick
-    loop is latency-sensitive and e2-micro's 0.25 vCPU baseline can throttle
-    exactly when a burst of depth diffs arrives. e2-micro is about half the
-    price if the run turns out not to need the headroom — check the skipped-tick
-    count in logcheck before downgrading.
+    e2-micro is the default because the workload really is tiny: one WebSocket,
+    a few hundred book levels, and one HTTPS call a second. In asia-northeast1
+    it is $7.84/month against $15.69 for e2-small (Sep 2026 list; E2 gets no
+    sustained-use discount, so the sticker price is the price).
+
+    The caveat is e2-micro's 0.25 vCPU baseline, which throttles under sustained
+    load. This workload is bursty, not sustained, so it should be fine — and if
+    it is not, you will know: throttling shows up in logcheck as a record rate
+    below the floor. Move to e2-small then, not before.
   EOT
   type        = string
-  default     = "e2-small"
+  default     = "e2-micro"
+}
+
+variable "disk_type" {
+  description = <<-EOT
+    pd-balanced at $0.13/GB/month, against $0.052 for pd-standard — $1.56 a
+    month on a 20GB disk. Not worth the sluggish boot and apt runs of an
+    HDD-backed disk, but pd-standard is there if every yen counts. The tick
+    logger writes about 3KB a second, which neither type notices.
+  EOT
+  type        = string
+  default     = "pd-balanced"
 }
 
 variable "disk_gb" {
   description = <<-EOT
     A day of ticks is roughly 90MB: ~29,000 records carrying the state text they
-    were evaluated against. 20GB holds most of a year, and the log shipper is
-    what actually bounds it.
+    were evaluated against. 20GB holds most of a year. Nothing prunes the local
+    copy — the shipper copies to GCS and never deletes — so this is the real
+    bound on an unattended run.
   EOT
   type        = number
   default     = 20
@@ -100,4 +116,23 @@ variable "alert_email" {
   EOT
   type        = string
   default     = ""
+}
+
+variable "billing_account" {
+  description = <<-EOT
+    Billing account id (as in `gcloud billing accounts list`). Set it and the
+    apply also creates a budget that mails you at 50/90/100% of budget_jpy.
+
+    Worth doing on a personal project: nothing here can run away, but a forgotten
+    VM costs about $12/month forever, and a forgotten collector costs ten times
+    that in model calls.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "budget_usd" {
+  description = "Monthly budget to alert against, in USD. Only used when billing_account is set."
+  type        = number
+  default     = 50
 }
