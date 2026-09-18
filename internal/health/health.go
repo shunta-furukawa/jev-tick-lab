@@ -62,9 +62,13 @@ type Report struct {
 	WindowS  string        `json:"window"`
 	From     time.Time     `json:"from"`
 	To       time.Time     `json:"to"`
-	Scanned  int           `json:"scanned"`  // records read
+	Scanned  int           `json:"scanned"`  // records read, whatever their age
 	Records  int           `json:"records"`  // records inside the window
 	Expected int           `json:"expected"` // records the cadence implies
+
+	// The newest record in the files at all, which is what tells an empty log
+	// apart from a stale one when the window turns up nothing.
+	NewestOverall time.Time `json:"newest_overall"`
 
 	RecordRate   float64 `json:"record_rate"`
 	NewestAgeSec float64 `json:"newest_age_sec"`
@@ -127,6 +131,9 @@ func Check(records []obs.Record, now time.Time, window time.Duration, t Threshol
 	)
 	for _, rec := range records {
 		at := rec.At.UTC()
+		if at.After(rep.NewestOverall) {
+			rep.NewestOverall = at
+		}
 		if at.Before(from) || at.After(now) {
 			continue
 		}
@@ -141,7 +148,23 @@ func Check(records []obs.Record, now time.Time, window time.Duration, t Threshol
 	}
 
 	if rep.Records == 0 {
-		rep.Problems = append(rep.Problems, fmt.Sprintf("no records in the last %s", window))
+		// Three very different situations produce zero records in the window,
+		// and saying only "no records" leaves the reader to guess which.
+		// obs.NewLogger creates the file at start-up, before the first record,
+		// so an empty log is also what a healthy run looks like during warmup.
+		switch {
+		case rep.Scanned == 0:
+			rep.Problems = append(rep.Problems, fmt.Sprintf(
+				"the tick log is empty. The collector creates the file when it starts, so this is also "+
+					"what a run looks like before its first record: it waits for a seeded book and for "+
+					"-min-history of bar series. If it has been longer than that, check the journal"))
+		case !rep.NewestOverall.IsZero():
+			rep.Problems = append(rep.Problems, fmt.Sprintf(
+				"%d records in the log but none in the last %s; the newest is %s old. The collector stopped",
+				rep.Scanned, window, now.Sub(rep.NewestOverall).Round(time.Second)))
+		default:
+			rep.Problems = append(rep.Problems, fmt.Sprintf("no records in the last %s", window))
+		}
 		return rep
 	}
 

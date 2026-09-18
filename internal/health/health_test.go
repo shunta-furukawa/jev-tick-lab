@@ -67,14 +67,15 @@ func TestAHealthyHourPasses(t *testing.T) {
 }
 
 // The whole reason this runs on a timer: silence must be loud.
+// What that silence means is TestAnEmptyLogSaysItMightJustBeWarmingUp.
 func TestAnEmptyWindowIsAFailureNotACleanBillOfHealth(t *testing.T) {
 	t.Parallel()
 	rep := Check(nil, now, hour(), DefaultThresholds())
 	if rep.OK() {
 		t.Fatal("no records at all was reported as healthy")
 	}
-	if !strings.Contains(rep.Problems[0], "no records") {
-		t.Errorf("problem = %q", rep.Problems[0])
+	if len(rep.Problems) != 1 {
+		t.Errorf("problems = %v, want exactly one", rep.Problems)
 	}
 }
 
@@ -267,4 +268,45 @@ func containsMatch(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// obs.NewLogger creates the tick file when the collector starts, before its
+// first record. So "the file exists and is empty" is what a healthy run looks
+// like during warmup, and also what a run that died on its first tick looks
+// like. Reporting only "no records" leaves the reader to guess which.
+func TestAnEmptyLogSaysItMightJustBeWarmingUp(t *testing.T) {
+	t.Parallel()
+	rep := Check(nil, now, hour(), DefaultThresholds())
+
+	if rep.OK() {
+		t.Fatal("an empty log is not healthy")
+	}
+	for _, want := range []string{"empty", "before its first record", "min-history"} {
+		if !containsMatch(rep.Problems, want) {
+			t.Errorf("problems = %v, want one mentioning %q", rep.Problems, want)
+		}
+	}
+}
+
+// The other zero-records case, which needs the opposite reaction.
+func TestAStaleLogSaysTheCollectorStopped(t *testing.T) {
+	t.Parallel()
+	records := series(600)
+	for i := range records {
+		records[i].At = records[i].At.Add(-5 * time.Hour)
+	}
+
+	rep := Check(records, now, hour(), DefaultThresholds())
+	if rep.OK() {
+		t.Fatal("a log that stopped five hours ago is not healthy")
+	}
+	if !containsMatch(rep.Problems, "stopped") {
+		t.Errorf("problems = %v, want one saying the collector stopped", rep.Problems)
+	}
+	if rep.Scanned != 600 {
+		t.Errorf("scanned = %d, want 600 — the count is what distinguishes this from an empty log", rep.Scanned)
+	}
+	if got := now.Sub(rep.NewestOverall); got < 4*time.Hour {
+		t.Errorf("newest overall is %s old, want about 5h", got)
+	}
 }

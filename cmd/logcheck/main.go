@@ -123,6 +123,11 @@ func emitText(rep health.Report) {
 
 	fmt.Printf("  records        %d of an expected %d (%.1f%%)\n", rep.Records, rep.Expected, rep.RecordRate*100)
 	if rep.Records == 0 {
+		fmt.Printf("  in the log     %d records\n", rep.Scanned)
+		if !rep.NewestOverall.IsZero() {
+			fmt.Printf("  newest         %s (%s ago)\n",
+				rep.NewestOverall.Format(time.RFC3339), rep.At.Sub(rep.NewestOverall).Round(time.Second))
+		}
 		fmt.Printf("\n  %s\n", rep.Problems[0])
 		return
 	}
