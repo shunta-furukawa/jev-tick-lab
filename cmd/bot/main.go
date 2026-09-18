@@ -4,7 +4,7 @@
 //
 //	observe  stream + state only, no model calls        (phase 1)
 //	shadow   stream + Jev + full logging, NO trading    (phase 2, the default)
-//	paper    shadow + simulated fills                   (phase 4)
+//	paper    shadow + simulated fills                   (phase 4, not implemented)
 //	live     real orders                                (phase 5, not implemented)
 package main
 
@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -34,45 +35,92 @@ func main() {
 		model   = flag.String("model", "jev-1.13.0", "TypeSafe model id — pin a version, never use an alias in a recorded run")
 		logDir  = flag.String("log-dir", "./data", "directory for JSONL tick logs")
 		tick    = flag.Duration("tick", time.Second, "evaluation cadence")
+		timeout = flag.Duration("call-timeout", 3*time.Second, "hard deadline for one Jev evaluation")
+		// Phase 1's exit criterion is "the state text renders correctly against
+		// live data", which needs a way to actually look at it.
+		printState = flag.Bool("print-state", false, "in observe mode, print the rendered state text each tick")
 	)
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	apiKey := os.Getenv("TYPESAFE_API_KEY")
-	if apiKey == "" && *mode != "observe" {
-		log.Error("TYPESAFE_API_KEY is not set")
+	if err := run(log, *pair, *mode, *model, *logDir, *tick, *timeout, *printState); err != nil {
+		log.Error("exiting", "err", err)
 		os.Exit(1)
 	}
-	if *mode == "live" {
-		log.Error("live mode is not implemented; see CLAUDE.md phase 5")
-		os.Exit(1)
+}
+
+func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout time.Duration, printState bool) error {
+	switch mode {
+	case "observe", "shadow":
+	case "paper":
+		return fmt.Errorf("paper mode is not implemented; see CLAUDE.md phase 4")
+	case "live":
+		return fmt.Errorf("live mode is not implemented; see CLAUDE.md phase 5")
+	default:
+		return fmt.Errorf("unknown mode %q", mode)
+	}
+
+	questions := jev.QuestionSet()
+	if err := jev.Validate(questions); err != nil {
+		return err
+	}
+
+	apiKey := os.Getenv("TYPESAFE_API_KEY")
+	if apiKey == "" && mode != "observe" {
+		return fmt.Errorf("TYPESAFE_API_KEY is not set")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	book := marketstate.NewBook(*pair)
+	book := marketstate.NewBook(pair)
 	sc := stream.New(log,
-		stream.DepthWholeRoom(*pair),
-		stream.DepthDiffRoom(*pair),
-		stream.TransactionsRoom(*pair),
+		stream.TickerRoom(pair),
+		stream.DepthWholeRoom(pair),
+		stream.DepthDiffRoom(pair),
+		stream.TransactionsRoom(pair),
+		stream.CircuitBreakInfoRoom(pair),
 	)
 	go sc.Run(ctx)
-	go ingest(ctx, log, sc, book, *pair)
+	go ingest(ctx, log, sc, book, pair)
 
-	logger, err := obs.NewLogger(*logDir)
-	if err != nil {
-		log.Error("open log", "err", err)
-		os.Exit(1)
-	}
-	defer logger.Close()
-
-	client := jev.New(apiKey, *model)
-	questions := jev.QuestionSet()
+	started := time.Now().UTC()
+	runID := obs.NewRunID(started)
 	thresholds := decide.DefaultThresholds()
 
-	// Position is flat here only because paper mode starts flat. In live mode
+	// Observe mode writes no records, so it does not open a log at all — an
+	// empty ticks file for a run that never evaluated anything is a trap for
+	// the analysis pass.
+	var logger *obs.Logger
+	if mode != "observe" {
+		var err error
+		if logger, err = obs.NewLogger(logDir); err != nil {
+			return fmt.Errorf("open log: %w", err)
+		}
+		defer logger.Close()
+
+		// The run header is what makes a logged tick interpretable months
+		// later: which thresholds, which question set, which model was asked.
+		if err := logger.WriteRun(obs.Run{
+			RunID:          runID,
+			StartedAt:      started,
+			Pair:           pair,
+			Mode:           mode,
+			ModelRequested: model,
+			TickInterval:   tick.String(),
+			Thresholds:     thresholds,
+			QuestionIDs:    jev.IDs(questions),
+			QuestionsHash:  obs.HashQuestions(questions),
+			Questions:      questions,
+		}); err != nil {
+			return fmt.Errorf("write run header: %w", err)
+		}
+	}
+
+	client := jev.New(apiKey, model)
+
+	// Position is flat here only because shadow mode never trades. In live mode
 	// this MUST be reconciled from the exchange before the first tick.
 	var position marketstate.Position
 
@@ -80,41 +128,77 @@ func main() {
 	// the tick is skipped rather than queued — a queued answer describes a market
 	// that no longer exists.
 	var inFlight atomic.Bool
+	var skipped, evaluated atomic.Int64
 
-	ticker := time.NewTicker(*tick)
+	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 
-	log.Info("started", "pair", *pair, "mode", *mode, "model", *model, "tick", tick.String())
+	log.Info("started", "run_id", runID, "pair", pair, "mode", mode, "model", model, "tick", tick.String())
+
+	// Warmup transitions are logged once each, not every second: a feed that
+	// never syncs must be visible, and one that flaps must not drown the log.
+	var ready, warnedNotReady bool
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info("shutting down")
+			log.Info("shutting down", "run_id", runID, "evaluated", evaluated.Load(), "skipped", skipped.Load())
 			// In live mode, flatten here before returning.
-			return
+			return nil
 
 		case now := <-ticker.C:
-			snap := book.Snapshot(now)
-			if snap.Last == 0 {
-				continue // not warmed up yet
+			snap := book.Snapshot(now.UTC())
+
+			// A tick without a price, or without a book that a depth_whole has
+			// seeded, has nothing to judge.
+			if snap.Last == 0 || !snap.BookSynced {
+				if ready || !warnedNotReady {
+					log.Warn("not ready", "last", snap.Last, "book_synced", snap.BookSynced, "stale", snap.Stale)
+					warnedNotReady = true
+				}
+				ready = false
+				continue
 			}
-			if *mode == "observe" {
+			if !ready {
+				log.Info("warmed up", "last", snap.Last, "spread_bps", snap.SpreadBps)
+				ready, warnedNotReady = true, false
+			}
+
+			if mode == "observe" {
+				if printState {
+					fmt.Print("\n" + marketstate.Render(snap, position) + "\n")
+				}
 				log.Info("snapshot",
 					"last", snap.Last, "spread_bps", snap.SpreadBps,
-					"ret60s", snap.Ret60s, "imbalance", snap.DepthImbalance)
+					"ret60s", snap.Ret60s, "imbalance", snap.DepthImbalance,
+					"trades_30s", snap.Trades30s, "circuit_break", snap.CircuitBreak)
 				continue
 			}
 			if !inFlight.CompareAndSwap(false, true) {
+				skipped.Add(1)
 				log.Warn("evaluation still in flight, skipping tick")
 				continue
 			}
 
 			go func(now time.Time, snap marketstate.Snapshot, pos marketstate.Position) {
 				defer inFlight.Store(false)
-				evaluate(ctx, log, client, logger, questions, thresholds, now, snap, pos, *model, *mode)
-			}(now, snap, position)
+				evaluate(ctx, log, client, logger, questions, thresholds, now, snap, pos, evalOpts{
+					runID:   runID,
+					model:   model,
+					mode:    mode,
+					timeout: timeout,
+				})
+				evaluated.Add(1)
+			}(now.UTC(), snap, position)
 		}
 	}
+}
+
+type evalOpts struct {
+	runID   string
+	model   string
+	mode    string
+	timeout time.Duration
 }
 
 func evaluate(
@@ -127,24 +211,25 @@ func evaluate(
 	now time.Time,
 	snap marketstate.Snapshot,
 	pos marketstate.Position,
-	modelRequested string,
-	mode string,
+	opts evalOpts,
 ) {
 	state := marketstate.Render(snap, pos)
 	sum := sha256.Sum256([]byte(state))
 
 	rec := obs.Record{
 		TickID:         now.UTC().Format(time.RFC3339Nano),
+		RunID:          opts.runID,
 		At:             now,
 		Pair:           snap.Pair,
-		ModelRequested: modelRequested,
+		Mode:           opts.mode,
+		ModelRequested: opts.model,
 		Snapshot:       snap,
 		StateText:      state,
 		StateHash:      hex.EncodeToString(sum[:]),
 	}
 
 	// Hard deadline: an answer that arrives after the tick window is useless.
-	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, opts.timeout)
 	defer cancel()
 
 	started := time.Now()
@@ -152,8 +237,12 @@ func evaluate(
 	rec.LatencyMs = float64(time.Since(started).Microseconds()) / 1000
 
 	if err != nil {
+		// A failed call is still a record. Gaps in the log are themselves data,
+		// but only if the gap is labelled.
 		rec.Error = err.Error()
-		_ = logger.Write(rec)
+		if writeErr := logger.Write(rec); writeErr != nil {
+			log.Error("log write", "err", writeErr)
+		}
 		log.Warn("jev call failed", "err", err, "latency_ms", rec.LatencyMs)
 		return
 	}
@@ -162,7 +251,7 @@ func evaluate(
 	rec.Answers = resp.Answers
 	rec.InputTokens = resp.Usage.InputTokens
 	rec.OutputTokens = resp.Usage.OutputTokens
-	rec.Signal = decide.Compose(now, resp.Answers, pos, thresholds)
+	rec.Signal = decide.Compose(now, time.Now().UTC(), snap, resp.Answers, pos, thresholds)
 
 	if err := logger.Write(rec); err != nil {
 		log.Error("log write", "err", err)
@@ -170,6 +259,7 @@ func evaluate(
 
 	log.Info("evaluated",
 		"intent", rec.Signal.Intent,
+		"gate", rec.Signal.Gate,
 		"action", rec.Signal.ActionChoice,
 		"prob", rec.Signal.ActionProb,
 		"conf", rec.Signal.ActionConf,
@@ -179,16 +269,19 @@ func evaluate(
 		"model", resp.Model,
 	)
 
-	if mode == "paper" {
-		// TODO(phase 4): hand rec.Signal to the paper executor.
-		_ = rec.Signal
-	}
+	// Phase 4 hands rec.Signal to the paper executor here. Nothing consumes it
+	// in shadow mode by design: phase 2 answers the interesting question
+	// without any execution code at all.
 }
 
 func ingest(ctx context.Context, log *slog.Logger, sc *stream.Client, book *marketstate.Book, pair string) {
-	whole := stream.DepthWholeRoom(pair)
-	diff := stream.DepthDiffRoom(pair)
-	tx := stream.TransactionsRoom(pair)
+	var (
+		ticker  = stream.TickerRoom(pair)
+		whole   = stream.DepthWholeRoom(pair)
+		diff    = stream.DepthDiffRoom(pair)
+		tx      = stream.TransactionsRoom(pair)
+		breaker = stream.CircuitBreakInfoRoom(pair)
+	)
 
 	for {
 		select {
@@ -197,12 +290,16 @@ func ingest(ctx context.Context, log *slog.Logger, sc *stream.Client, book *mark
 		case ev := <-sc.Events:
 			var err error
 			switch ev.Room {
+			case ticker:
+				err = book.ApplyTicker(ev.Data)
 			case whole:
 				err = book.ApplyDepthWhole(ev.Data)
 			case diff:
 				err = book.ApplyDepthDiff(ev.Data)
 			case tx:
 				err = book.ApplyTransactions(ev.Data)
+			case breaker:
+				err = book.ApplyCircuitBreak(ev.Data)
 			}
 			if err != nil {
 				log.Warn("apply event", "room", ev.Room, "err", err)

@@ -18,11 +18,15 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net/http"
+	"strconv"
 	"time"
 )
 
-const endpoint = "https://api.typesafe.ai/v1/systemone"
+// DefaultEndpoint is TypeSafe's System One endpoint. Client.Endpoint overrides
+// it, which is how the tests point the client at a local fake.
+const DefaultEndpoint = "https://api.typesafe.ai/v1/systemone"
 
 // Question is one typed question. Criteria's shape depends on Type:
 //
@@ -77,6 +81,7 @@ type Client struct {
 	Model      string // pin a versioned id in production, e.g. "jev-1.13.0"
 	HTTP       *http.Client
 	MaxRetries int
+	Endpoint   string
 }
 
 func New(apiKey, model string) *Client {
@@ -85,12 +90,14 @@ func New(apiKey, model string) *Client {
 		Model:      model,
 		HTTP:       &http.Client{Timeout: 5 * time.Second},
 		MaxRetries: 2, // a stale answer is worthless; fail fast and skip the tick
+		Endpoint:   DefaultEndpoint,
 	}
 }
 
 type APIError struct {
-	Status int
-	Body   string
+	Status     int
+	Body       string
+	RetryAfter time.Duration // from the Retry-After header, when the server sent one
 }
 
 func (e *APIError) Error() string { return fmt.Sprintf("typesafe %d: %s", e.Status, e.Body) }
@@ -98,6 +105,10 @@ func (e *APIError) Error() string { return fmt.Sprintf("typesafe %d: %s", e.Stat
 func (e *APIError) retryable() bool {
 	return e.Status == http.StatusTooManyRequests || e.Status == 529 || e.Status >= 500
 }
+
+// Retryable reports whether this error is worth another attempt. 401 and 422
+// are configuration mistakes: retrying them just burns the tick.
+func (e *APIError) Retryable() bool { return e.retryable() }
 
 // Ask evaluates all questions against one state in a single call.
 //
@@ -110,10 +121,19 @@ func (c *Client) Ask(ctx context.Context, state string, questions map[string]Que
 		return nil, err
 	}
 
-	var lastErr error
+	var (
+		lastErr error
+		wait    time.Duration
+	)
 	for attempt := 0; attempt <= c.MaxRetries; attempt++ {
 		if attempt > 0 {
 			delay := time.Duration(math.Pow(2, float64(attempt-1))) * 200 * time.Millisecond
+			// Jitter: every instance of this process ticks on the same second,
+			// so a synchronised retry storm is a real possibility.
+			delay += time.Duration(rand.Int63n(int64(delay/2 + 1)))
+			if wait > delay {
+				delay = wait // the server told us how long to wait
+			}
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -121,7 +141,11 @@ func (c *Client) Ask(ctx context.Context, state string, questions map[string]Que
 			}
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		target := c.Endpoint
+		if target == "" {
+			target = DefaultEndpoint
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
@@ -138,11 +162,15 @@ func (c *Client) Ask(ctx context.Context, state string, questions map[string]Que
 		resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			apiErr := &APIError{Status: resp.StatusCode, Body: string(raw)}
+			apiErr := &APIError{
+				Status:     resp.StatusCode,
+				Body:       string(raw),
+				RetryAfter: retryAfter(resp.Header.Get("Retry-After")),
+			}
 			if !apiErr.retryable() {
 				return nil, apiErr
 			}
-			lastErr = apiErr
+			lastErr, wait = apiErr, apiErr.RetryAfter
 			continue
 		}
 
@@ -153,4 +181,18 @@ func (c *Client) Ask(ctx context.Context, state string, questions map[string]Que
 		return &out, nil
 	}
 	return nil, fmt.Errorf("exhausted retries: %w", lastErr)
+}
+
+// retryAfter reads the header in its delta-seconds form. An absolute HTTP date
+// is ignored: at a one-second cadence any wait long enough to be expressed that
+// way means the tick is lost anyway.
+func retryAfter(h string) time.Duration {
+	if h == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(h)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
