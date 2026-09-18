@@ -155,7 +155,10 @@ make check   # vet, gofmt check, go test -race ./...
 
 ## Status
 
-Phase 1 is verified against the live exchange; phase 2 is code complete but has
-not yet been run for long enough to produce a dataset. The phase 3 tools are
-written and tested, but have only ever seen synthetic input. See the TODO list
-in [CLAUDE.md](./CLAUDE.md).
+**Phase 1 passed**: 65 minutes against the live exchange, 3,898 ticks, zero gaps,
+zero reconnects — [the record](docs/phase1-run.md), including the three things
+worth carrying into phase 2.
+
+Phase 2 is code complete and has infrastructure to run on, but has not been run
+long enough to produce a dataset. The phase 3 tools are written and tested
+against synthetic input only. See the TODO list in [CLAUDE.md](./CLAUDE.md).

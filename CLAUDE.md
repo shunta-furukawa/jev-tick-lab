@@ -297,7 +297,7 @@ Do not skip ahead. Each phase gates the next.
 
 | Phase | `-mode` | State | Exit criteria |
 |---|---|---|---|
-| 1 | `observe` | ✅ stream verified, state renders against live data | An hour of live running with no gaps — **still to do**: only minutes have been run so far |
+| 1 | `observe` | ✅ **passed** — 65 min live, 3,898 ticks, zero gaps, zero reconnects ([record](docs/phase1-run.md)) | An hour of live running with no gaps |
 | 2 | `shadow` | 🔨 code complete, not yet run for real | Several days of clean tick logs, no trading |
 | 3 | — | 🔨 tooling built (`cmd/fill`, `cmd/calib`), no real data yet | Calibration analysis run; question set revised on the evidence |
 | 4 | `paper` | ⬜ not started, `-mode paper` exits with an error | Fill simulator with realistic maker/taker and queue assumptions |
@@ -328,13 +328,14 @@ Done since the skeleton:
 - ~~Somewhere to actually run it~~ → `terraform/`, `deploy/`, and
   `cmd/logcheck` for the hourly verdict. Not yet applied to a real project.
 
+- ~~Run phase 1 for an hour~~ → [docs/phase1-run.md](docs/phase1-run.md). Zero
+  gaps, zero reconnects, 2s warmup. It also confirmed the sparse-trade problem
+  at scale: **28.4% of ticks had seen no print in 30 seconds**, which is what
+  the continuous bar series exists for.
+
 Next, in order:
 
-1. **Run phase 1 for an hour and read the state text.** The renderer has been
-   checked against live data for minutes, not hours. Watch for: reconnect
-   behaviour, the book going unsynced, a pair going quiet for long enough that
-   the carried-forward series says something silly.
-2. **Run phase 2 for several days.** This is the whole point. It needs no
+1. **Run phase 2 for several days.** This is the whole point. It needs no
    execution code. Pin `-model` to a version and leave it alone for the run.
 3. **Then, and only then, phase 3.** `cmd/fill` and `cmd/calib` are written but
    have only ever seen synthetic input. Expect to find that some question has no
