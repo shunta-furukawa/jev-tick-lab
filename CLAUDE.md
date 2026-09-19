@@ -113,6 +113,7 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `internal/exec` | Fill simulation, order placement | Reading Jev answers directly — it consumes `decide.Signal` only |
 | `internal/calib` | Reliability bins, Brier, ECE, outcome definitions | Any I/O; `cmd/calib` reads the files |
 | `internal/health` | Whether a running collection is still producing usable data | Any I/O; `cmd/logcheck` reads the files and picks the exit code |
+| `internal/report` | Turning a tick log into a page: summaries, SVG, the HTML | Any I/O; `cmd/report` reads and writes the files |
 
 | Command | Does |
 |---|---|
@@ -122,6 +123,7 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `cmd/calib` | The calibration report: stated probability against realised frequency |
 | `cmd/logcheck` | Hourly health verdict on the collection. Exit 0 healthy, 1 degraded, 2 could not tell |
 | `cmd/preflight` | One real call to TypeSafe, then checks the whole response. Run it before any long collection. `-dry-run` needs no key |
+| `cmd/report` | One self-contained HTML page from a tick log: collection health, answer distributions against the gates that read them, and the reliability curve once the log has been filled |
 
 ### Key design decisions and why
 
@@ -196,6 +198,16 @@ changed renderer, and the state text is the biggest lever on answer quality
 there is. `go build` stamps the revision automatically; `go run` does not, so a
 local run records `unknown (go run)` rather than an empty field that could be
 mistaken for a missing one.
+
+**The report is one file with nothing outside it.** `cmd/report` writes a single
+HTML page — no CDN, no fonts, no external scripts — because it has to open from
+a laptop, from a GCS bucket, and from an archive in a year's time, which is the
+same standard the JSONL is held to. `TestHTMLIsSelfContained` enforces it.
+
+Chart colours come from a validated palette and the marks use one hue. Status
+colours appear only in stat tiles, always beside a word: status-good and
+status-critical are four Delta E apart under deuteranopia, so they may never
+carry meaning alone.
 
 **Health is a property of the data, not of the process.** systemd restarts a
 dead bot. It cannot see the failure that actually costs this experiment its

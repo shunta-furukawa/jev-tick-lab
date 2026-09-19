@@ -126,6 +126,18 @@ and never written to disk. Logs ship to GCS hourly.
 including what to do when the health check goes red, is in
 [docs/operations.md](docs/operations.md).
 
+### Looking at it
+
+```bash
+go run ./cmd/report -in data/ticks-2026-09-18-filled.jsonl -tick 3s
+```
+
+One self-contained HTML file: collection health over time, what stopped each
+tick, each question's answers drawn against the gate that reads them, and — on a
+filled log — the reliability curve the experiment exists to produce. No CDN, no
+fonts, no external scripts, so it opens the same from a laptop, a GCS bucket, or
+an archive in a year.
+
 ### Knowing whether the run is still worth anything
 
 ```bash
@@ -155,6 +167,8 @@ internal/health/      is the collection still producing usable data?
 internal/exec/        fill simulation (phase 4, not implemented)
 cmd/logcheck/         hourly health verdict, exit code is the interface
 cmd/preflight/        one real API call, fully checked, before a long run
+cmd/report/           a self-contained HTML page of a run
+internal/report/      its summaries and SVG
 terraform/            the VM and its surroundings
 deploy/               systemd units, secret fetch, log shipping, deploy script
 docs/                 stream verification, operations runbook, secrets inventory

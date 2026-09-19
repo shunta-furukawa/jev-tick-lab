@@ -1,4 +1,4 @@
-.PHONY: help build build-linux build-all run-observe run-shadow dump logcheck preflight preflight-dry check test race vet fmt fmt-check tidy clean deploy
+.PHONY: help build build-linux build-all run-observe run-shadow dump logcheck report preflight preflight-dry check test race vet fmt fmt-check tidy clean deploy
 
 # `make help` lists what exists. If a target you expect is missing, the checkout
 # is older than you think — see the phase order in CLAUDE.md.
@@ -14,6 +14,7 @@ help:
 	@echo "    preflight       one real API call, fully checked. Needs TYPESAFE_API_KEY"
 	@echo "    preflight-dry   everything preflight does except the call. No key needed"
 	@echo "    logcheck        is the collection still producing usable data?"
+	@echo "    report          a self-contained HTML page of the run"
 	@echo
 	@echo "  building and checking"
 	@echo "    build           bin/bot for this machine"
@@ -47,6 +48,11 @@ dump:
 # Is the collection still producing a usable dataset?
 logcheck:
 	go run ./cmd/logcheck -dir ./data -window 1h
+
+# A self-contained HTML page from a tick log. Add -in a filled log for the
+# reliability curve.
+report:
+	go run ./cmd/report -in data/ticks-$(shell date -u +%Y-%m-%d).jsonl -tick 3s
 
 # One real API call, checked end to end. Run before any long collection.
 preflight:
