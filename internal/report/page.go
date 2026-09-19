@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"html/template"
+	"math"
 	"time"
 )
 
@@ -21,6 +22,15 @@ func human(n int) string {
 		out = append(out, c)
 	}
 	return string(out)
+}
+
+// jpy formats yen with a sign, because every number it renders is a gain or a
+// loss and an unsigned one reads as neither.
+func jpy(v float64) string {
+	if math.Abs(v) < 0.005 {
+		return "0.00 JPY"
+	}
+	return fmt.Sprintf("%+.2f JPY", v)
 }
 
 func round(d time.Duration) string {
@@ -151,13 +161,21 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
      the same to a viewer who cannot separate the hues. */
   .callrule { stroke: var(--baseline); stroke-width: 1; stroke-dasharray: 3 3; }
   .callring { fill: none; stroke: var(--series-1); stroke-width: 1.5; }
+  /* An execution, as opposed to a call for one: a different shape, so the two
+     stay distinguishable with the hue removed. */
+  .fillmark { fill: var(--text-primary); }
+  .heldband { fill: var(--series-1); opacity: .22; }
   .mark:hover, .mark:focus, .dot:hover, .dot:focus,
   .tickdot:hover, .tickdot:focus { fill: var(--text-primary); outline: none; }
   .tickdot:hover, .tickdot:focus { r: 4; }
 
   details { margin: 6px 0 0; }
   summary { cursor: pointer; font-size: 12.5px; color: var(--text-secondary); padding: 4px 0; }
-  table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin-top: 6px; }
+  /* An eight-column table does not fit a phone, and a table that does not fit
+     drags the whole page sideways with it. Scroll the table, not the page. */
+  .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin-top: 6px;
+          min-width: max-content; }
   th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--grid);
            font-variant-numeric: tabular-nums; }
   th:first-child, td:first-child { text-align: left; }
@@ -202,10 +220,12 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
     {{.SVG}}
     <details{{if .Open}} open{{end}}>
       <summary>{{if .Summary}}{{.Summary}}{{else}}Table view{{end}}</summary>
-      <table>
-        <thead><tr>{{range .Head}}<th>{{.}}</th>{{end}}</tr></thead>
-        <tbody>{{range .Table}}<tr>{{range .}}<td>{{.}}</td>{{end}}</tr>{{end}}</tbody>
-      </table>
+      <div class="scroll">
+        <table>
+          <thead><tr>{{range .Head}}<th>{{.}}</th>{{end}}</tr></thead>
+          <tbody>{{range .Table}}<tr>{{range .}}<td>{{.}}</td>{{end}}</tr>{{end}}</tbody>
+        </table>
+      </div>
     </details>
   </section>
   {{end}}

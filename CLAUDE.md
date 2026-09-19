@@ -110,14 +110,14 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `internal/jev` | HTTP client, question definitions | Any decision logic |
 | `internal/decide` | Thresholds, gating order, signal composition | Any I/O; must stay pure and testable |
 | `internal/obs` | JSONL records, rotation | Any blocking work in the hot path |
-| `internal/exec` | Fill simulation, order placement | Reading Jev answers directly — it consumes `decide.Signal` only |
+| `internal/exec` | Fill simulation, the position ledger, order placement | Reading Jev answers directly — it consumes `decide.Signal` only |
 | `internal/calib` | Reliability bins, Brier, ECE, outcome definitions | Any I/O; `cmd/calib` reads the files |
 | `internal/health` | Whether a running collection is still producing usable data | Any I/O; `cmd/logcheck` reads the files and picks the exit code |
 | `internal/report` | Turning a tick log into a page: summaries, the tick-by-tick tape, SVG, the HTML | Any I/O; `cmd/report` reads and writes the files. Claiming a trade — shadow mode fills nothing |
 
 | Command | Does |
 |---|---|
-| `cmd/bot` | The tick loop. `-mode observe\|shadow` |
+| `cmd/bot` | The tick loop. `-mode observe\|shadow\|paper` |
 | `cmd/dump` | Prints raw stream frames. Does not import `internal/stream`, so it shows the wire rather than our reading of it |
 | `cmd/fill` | Forward-fill: joins each logged tick to the price 10s/60s/300s later |
 | `cmd/calib` | The calibration report: stated probability against realised frequency |
@@ -225,6 +225,60 @@ Chart colours come from a validated palette and the marks use one hue. Status
 colours appear only in stat tiles, always beside a word: status-good and
 status-critical are four Delta E apart under deuteranopia, so they may never
 carry meaning alone.
+
+**Paper mode runs both execution paths, never one.** Maker and taker are not
+variants of a strategy. All-taker is 24bps a round trip and always fills;
+all-maker is a 4bps rebate and often does not fill at all. That 28bps gap is
+wider than most of the moves this experiment is trying to predict, so running
+one path and quoting the other's fees produces a number that means nothing.
+`exec.Trader` runs both against the identical answer set, which makes execution
+the only variable.
+
+`decide.Compose` is pure, so it is evaluated once per path against that path's
+own position: the books genuinely diverge — a maker entry that never filled
+leaves that path flat while the taker path is long — and the gates that read a
+position (`pyramid`, `flat`) have to see the truth for the path they gate. The
+tick record carries the taker path's signal and the position it was composed
+against, so it still re-scores exactly; the maker path's position and gate are
+in `record.paper`.
+
+The one place this is lossy: both paths read answers produced from a state text
+describing the **taker** position. It matters only for the questions that read
+a position at all (`hold_risk`, and take/stop in `trader_action`). The
+alternative is two model calls a tick, which doubles the bill to remove a
+caveat rather than a result.
+
+**A maker fill comes from prints, never from the price touching the limit.** A
+resting buy does not fill because the price came down to it. It fills because
+sellers hit the bid and consumed the size ahead of it. Driving fills from real
+`transactions` prints is what makes adverse selection fall out of the model
+instead of having to be bolted on: the order fills precisely when the market is
+moving against it and sits there when it is right. Joining a level means
+joining the **back** of it — assuming the front is the single largest source of
+maker profit that does not exist.
+
+Prints are cursored on `transaction_id`, not on time. bitbank stamps in
+milliseconds and routinely puts several prints in one, so a time cursor either
+drops the rest of that millisecond or replays it, and both corrupt a queue
+model.
+
+Measured against the live book on 2026-09-19: xrp_jpy rests **5,000–11,000
+units at the touch** against prints of one to two thousand, and the spread is
+about one tick (~0.05bps). So the taker path barely pays the spread — it pays
+the fee — and a passive order joining the back of that queue will mostly time
+out rather than fill. Expect the maker path to report far fewer round trips
+than the taker path. That is the result, not a defect in it.
+
+**Paper mode never shorts.** `decide.Compose` emits `IntentOpenShort` because
+the model is asked a symmetric question, but this is spot: there is no borrow,
+so there is nothing to sell. `exec.Simulator.Submit` returns `ErrShortOnSpot`
+rather than filling it, because a position that could never have existed must
+not enter the dataset. `AllowShort` is configuration, so margin remains a
+change of setting rather than a change of belief.
+
+**Shutdown cancels orders and never closes positions.** A paper run that
+liquidates on Ctrl-C reports a P&L that depended on when you pressed it. Open
+positions stay open and marked.
 
 **Health is a property of the data, not of the process.** systemd restarts a
 dead bot. It cannot see the failure that actually costs this experiment its
@@ -467,7 +521,7 @@ Do not skip ahead. Each phase gates the next.
 | 1 | `observe` | ✅ **met** — two hours live, 5,217 ticks, zero gaps; 1,319 rendered states checked, which found a permanent `Return 300s` bug ([record](docs/phase1-run.md)) | State text renders correctly against live data for an hour with no gaps |
 | 2 | `shadow` | 🔨 code complete, not yet run for real | Several days of clean tick logs, no trading |
 | 3 | — | 🔨 tooling built (`cmd/fill`, `cmd/calib`), no real data yet | Calibration analysis run; question set revised on the evidence |
-| 4 | `paper` | ⬜ not started, `-mode paper` exits with an error | Fill simulator with realistic maker/taker and queue assumptions |
+| 4 | `paper` | 🔨 built and unit tested, never run against a live market | Fill simulator with realistic maker/taker and queue assumptions |
 | 5 | `live` | ⬜ blocked, `-mode live` exits with an error | Minimum size only, after daily loss cap + flatten-on-death exist |
 
 **Phase 2 is where the value is.** It requires no execution code at all and
@@ -496,6 +550,8 @@ means it typechecks, has tests against a fake, and has never met production.
 | the shadow path end to end | ✅ 195 records over 10 min: 100% tick density, zero failed calls, zero holes, logcheck HEALTHY |
 | `decide` against real answers | ⚠️ runs clean, but the anomaly gate's threshold is still unexamined — see below |
 | `cmd/fill`, `cmd/calib` | ❌ synthetic input only |
+| `marketstate.Ladder`, `TradesAfter` | ✅ 35 min live: ~200 levels a side, zero crossed books, zero out-of-order levels, zero duplicated or replayed prints |
+| the fill simulator | ⚠️ unit tested hard, including the 24bps round trip — but it has never seen a live market, because that needs an API key and a running phase 4 |
 | Terraform | ❌ never applied to a project |
 | `deploy/deploy.sh` | ❌ syntax checked only |
 
@@ -538,13 +594,22 @@ stays awake.
    Start with `book_pressure`: phase 1 measured the book as bid-heavy 70% of the
    time, so its base rate may be structural rather than informative.
 
-6. **`internal/exec/paper.go`** — phase 4, and the point at which the region
-   decision above needs revisiting. Do not start it early.
+6. ~~`internal/exec/paper.go`~~ — **built 2026-09-19**, at the owner's
+   direction and out of the phase order. It is a simulator, not a result: the
+   thresholds it trades on are still the untuned defaults, so treat a paper
+   P&L as "what these particular gates did", not "what the strategy does".
+   Phase 3 is still what turns it into a number worth believing.
+
+   **The region decision above is now due.** Fills are about the round trip to
+   bitbank, where 110ms out of us-west1 is no longer a rounding error —
+   `-order-latency` defaults to 150ms and should be measured, not assumed.
 
 ## Things deliberately not built
 
 - **Backtester.** See rule 1.
-- **Live order placement.** Phase 5; `-mode live` exits with an error.
+- **Live order placement.** Phase 5; `-mode live` exits with an error. Paper
+  mode places nothing and needs no bitbank credentials — it simulates against
+  the public book.
 - **Margin/leverage.** Spot only.
 - **Multi-pair.** One pair per process. Run more processes if needed.
 

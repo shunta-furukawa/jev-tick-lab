@@ -79,6 +79,24 @@ type Dist struct {
 	GateAbove bool // true when the gate fires ABOVE the threshold
 }
 
+// Path is one execution style's standing: what it holds, what it has closed,
+// and what the fees did to it.
+type Path struct {
+	Style     string
+	Intent    string
+	Gate      string
+	Side      string
+	Size      float64
+	EntryPx   float64
+	Working   int
+	Trips     int
+	Wins      int
+	NetJPY    float64
+	FeesJPY   float64
+	UnrealJPY float64
+	GrossJPY  float64 // net + fees, so the fee bite is visible as a number
+}
+
 // Tick is one evaluation, kept whole for the tape: what the market was doing,
 // what the model called, and what the gates did with it.
 type Tick struct {
@@ -96,6 +114,12 @@ type Tick struct {
 	// Wanted is true when the model called for an entry or an exit rather than
 	// waiting — the only thing that could ever have become a trade.
 	Wanted bool
+
+	// Filled marks a tick where the taker path actually executed, and Held
+	// whether it was carrying a position. In shadow mode both are always
+	// false, which is the honest answer.
+	Filled bool
+	Held   bool
 }
 
 // Report is everything the page draws.
@@ -127,6 +151,10 @@ type Report struct {
 	Recent   []Tick
 	PriceMin float64
 	PriceMax float64
+
+	// Paper is set only for a paper-mode log: the execution paths as of the
+	// most recent record.
+	Paper []Path
 
 	Timeline []Bucket
 	Gates    []Count
@@ -246,6 +274,7 @@ func Build(records []obs.Record, opt Options) Report {
 		rep.CostPerDay = rep.CostUSD / span * 86400
 	}
 
+	rep.Paper = paths(sorted)
 	rep.ObservedTick = observedTick(sorted)
 	rep.Recent, rep.PriceMin, rep.PriceMax = recent(sorted, opt.RecentTicks)
 	rep.Timeline = timeline(sorted, rep.From, rep.To, opt)
@@ -265,6 +294,31 @@ func Build(records []obs.Record, opt Options) Report {
 		})
 	}
 	return rep
+}
+
+// paths reads the execution state off the newest record that has one.
+//
+// It is a standing, not a sum: the ledger inside the bot already carries the
+// running totals, so the last record holds them. Re-deriving them by adding up
+// the log would double-count every restart.
+func paths(recs []obs.Record) []Path {
+	for i := len(recs) - 1; i >= 0; i-- {
+		if len(recs[i].Paper) == 0 {
+			continue
+		}
+		out := make([]Path, 0, len(recs[i].Paper))
+		for _, p := range recs[i].Paper {
+			out = append(out, Path{
+				Style: p.Style, Intent: p.Intent, Gate: p.Gate,
+				Side: p.Position.Side, Size: p.Position.Size, EntryPx: p.Position.EntryPrice,
+				Working: p.Working, Trips: p.RoundTrip, Wins: p.Wins,
+				NetJPY: p.NetJPY, FeesJPY: p.FeesJPY, UnrealJPY: p.UnrealJPY,
+				GrossJPY: p.NetJPY + p.FeesJPY,
+			})
+		}
+		return out
+	}
+	return nil
 }
 
 // observedTick is the median gap between consecutive records.
@@ -304,6 +358,10 @@ func recent(recs []obs.Record, n int) ([]Tick, float64, float64) {
 	out := make([]Tick, 0, len(recs))
 	min, max := math.Inf(1), math.Inf(-1)
 	var prev float64
+	// Whether the previous tick was carrying a position, so a change can be
+	// spotted. Starts unset: the first tick in the window has nothing to
+	// differ from, and calling it a fill would put a mark on every reload.
+	prevHeld, havePrev := false, false
 
 	for _, rec := range recs {
 		t := Tick{
@@ -326,6 +384,17 @@ func recent(recs []obs.Record, n int) ([]Tick, float64, float64) {
 		if rec.Error != "" {
 			t.Gate = "call failed"
 		}
+		for _, p := range rec.Paper {
+			if p.Style != "taker" {
+				continue
+			}
+			t.Held = !p.Position.IsFlat()
+		}
+		// A tick where the taker path's position changed is a tick where
+		// something executed. The fills log has the detail; the chart only
+		// needs to know a mark belongs here.
+		t.Filled = havePrev && prevHeld != t.Held
+		prevHeld, havePrev = t.Held, true
 		if prev > 0 && t.Price > 0 {
 			t.DeltaBps = (t.Price - prev) / prev * 10000
 		}

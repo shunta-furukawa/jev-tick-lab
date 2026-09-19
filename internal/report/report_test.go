@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shunta-furukawa/jev-tick-lab/internal/exec"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/jev"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/marketstate"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/obs"
@@ -402,3 +403,83 @@ func TestACadenceMismatchIsCalledOutRatherThanReportedAsBrokenCollection(t *test
 }
 
 func warnings(r Report) string { return strings.Join(r.view().Warnings, " | ") }
+
+// paperRecords is a run where the taker path traded and the maker path did not.
+func paperRecords(n int, heldFrom, heldTo int) []obs.Record {
+	return records(n, func(i int, r *obs.Record) {
+		r.Mode = "paper"
+		pos := marketstate.Position{}
+		if i >= heldFrom && i < heldTo {
+			pos = marketstate.Position{Side: "long", Size: 48, EntryPrice: 207.0, OpenedAt: t0}
+		}
+		r.Position = pos
+		r.Paper = []exec.StyleState{
+			{Style: "taker", Position: pos, RoundTrip: 2, Wins: 0, NetJPY: -24, FeesJPY: 50},
+			{Style: "maker", RoundTrip: 0, Wins: 0, NetJPY: 0, FeesJPY: 0, Working: 1},
+		}
+	})
+}
+
+func TestPaperStandingIsReadFromTheNewestRecordNotSummed(t *testing.T) {
+	t.Parallel()
+	// The ledger in the bot already carries the running totals, so every
+	// record repeats them. Adding the column up would multiply the P&L by the
+	// number of ticks.
+	rep := Build(paperRecords(50, 10, 20), DefaultOptions())
+	if len(rep.Paper) != 2 {
+		t.Fatalf("paths = %d, want 2", len(rep.Paper))
+	}
+	if rep.Paper[0].NetJPY != -24 {
+		t.Errorf("taker net = %v, want -24 — the standing, not a sum", rep.Paper[0].NetJPY)
+	}
+	// Gross is derived so the fee bite is a number on the page rather than
+	// something the reader has to do in their head.
+	if rep.Paper[0].GrossJPY != 26 {
+		t.Errorf("taker gross = %v, want 26 (net -24 plus 50 of fees)", rep.Paper[0].GrossJPY)
+	}
+}
+
+func TestShadowLogsGetNoPaperSection(t *testing.T) {
+	t.Parallel()
+	rep := Build(records(50), DefaultOptions())
+	if len(rep.Paper) != 0 {
+		t.Fatal("a shadow log produced an execution section")
+	}
+	page, err := rep.HTML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(page, "Paper execution") {
+		t.Error("the page claims paper execution on a run that executed nothing")
+	}
+}
+
+func TestTheTapeMarksWhereThePositionChangedHands(t *testing.T) {
+	t.Parallel()
+	opt := DefaultOptions()
+	opt.RecentTicks = 50
+	rep := Build(paperRecords(50, 10, 20), opt)
+
+	var held, filled int
+	for _, tk := range rep.Recent {
+		if tk.Held {
+			held++
+		}
+		if tk.Filled {
+			filled++
+		}
+	}
+	if held != 10 {
+		t.Errorf("held ticks = %d, want 10", held)
+	}
+	// Two changes of hands: into the position and out of it.
+	if filled != 2 {
+		t.Errorf("executions marked = %d, want 2", filled)
+	}
+
+	// The first tick of the window has nothing to differ from, so it must not
+	// be marked — otherwise every reload invents an execution.
+	if rep.Recent[0].Filled {
+		t.Error("the first tick in the window was marked as an execution")
+	}
+}

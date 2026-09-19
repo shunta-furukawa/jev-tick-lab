@@ -108,6 +108,12 @@ func (r Report) view() pageView {
 				want, o, o))
 		}
 	}
+	// In paper mode the P&L is the thing you opened the page for, so it goes
+	// in front of the collection statistics rather than below them.
+	if len(r.Paper) > 0 {
+		v.Tiles = append(paperTiles(r), v.Tiles...)
+	}
+
 	if len(r.Runs) > 1 {
 		v.Warnings = append(v.Warnings, fmt.Sprintf("This window spans %d runs — the collector restarted. "+
 			"Check build_revision in runs-*.jsonl before comparing across the restart.", len(r.Runs)))
@@ -121,6 +127,9 @@ func (r Report) view() pageView {
 	if len(r.Recent) > 0 {
 		v.Sections = append(v.Sections, r.priceSection())
 	}
+	if len(r.Paper) > 0 {
+		v.Sections = append(v.Sections, r.paperSection())
+	}
 	v.Sections = append(v.Sections, r.timelineSection(), r.gateSection())
 	for _, d := range r.Dists {
 		v.Sections = append(v.Sections, d.section())
@@ -129,6 +138,79 @@ func (r Report) view() pageView {
 		v.Sections = append(v.Sections, r.calibrationSection())
 	}
 	return v
+}
+
+// paperTiles are the numbers a paper run is actually about.
+func paperTiles(r Report) []tile {
+	var out []tile
+	for _, p := range r.Paper {
+		net := p.NetJPY + p.UnrealJPY
+		note := fmt.Sprintf("%d round trip(s), %d up", p.Trips, p.Wins)
+		if p.Working > 0 {
+			note += fmt.Sprintf(", %d working", p.Working)
+		}
+		out = append(out, tile{
+			// The unit goes in the label. A stat tile is 24px type in a 140px
+			// column, and "+1,234.56 JPY" wraps onto a second line there,
+			// which strands the status dot on a line of its own.
+			Label:  p.Style + " net (JPY)",
+			Value:  fmt.Sprintf("%+.2f", net),
+			Note:   note,
+			Status: status("good", net > 0),
+		})
+	}
+	// The gap between the two is the entire point of running both, so it is
+	// its own tile rather than something to be worked out by subtraction.
+	if len(r.Paper) == 2 {
+		a, b := r.Paper[0], r.Paper[1]
+		out = append(out, tile{
+			Label: "fees paid (JPY)",
+			Value: fmt.Sprintf("%+.2f", a.FeesJPY+b.FeesJPY),
+			Note:  fmt.Sprintf("%s %s, %s %s", a.Style, jpy(a.FeesJPY), b.Style, jpy(b.FeesJPY)),
+		})
+	}
+	return out
+}
+
+// paperSection lays the paths side by side. Gross before fees against net
+// after them is the comparison the whole phase exists to make: an all-taker
+// round trip on a JPY alt is 24bps, which is larger than most of the moves
+// this experiment is trying to predict.
+func (r Report) paperSection() section {
+	note := "The same answers, executed two ways. Taker crosses the spread and always fills; " +
+		"maker rests at the touch, earns the rebate, and often does not fill at all. " +
+		"Gross is before fees, net is after — the difference is the cost of getting in and out."
+	for _, p := range r.Paper {
+		if p.Working > 0 || p.Size > 0 {
+			continue
+		}
+		if p.Trips == 0 {
+			note += fmt.Sprintf(" The %s path has not completed a round trip yet.", p.Style)
+		}
+	}
+
+	s := section{
+		Title:   "Paper execution — maker against taker",
+		Note:    note,
+		Summary: "Per path",
+		Open:    true,
+		Head:    []string{"path", "position", "round trips", "up", "gross", "fees", "net", "unrealised"},
+	}
+	for _, p := range r.Paper {
+		pos := "flat"
+		if p.Size > 0 {
+			pos = fmt.Sprintf("%s %.4f @ %.3f", p.Side, p.Size, p.EntryPx)
+		}
+		if p.Working > 0 {
+			pos += fmt.Sprintf(" (+%d working)", p.Working)
+		}
+		s.Table = append(s.Table, []string{
+			p.Style, pos, fmt.Sprint(p.Trips), fmt.Sprint(p.Wins),
+			jpy(p.GrossJPY), jpy(p.FeesJPY), jpy(p.NetJPY), jpy(p.UnrealJPY),
+		})
+	}
+	s.SVG = svgPaths(r.Paper)
+	return s
 }
 
 func perCall(r Report) float64 {
@@ -180,13 +262,30 @@ func (r Report) priceSection() section {
 			priceStr(first, r.PriceMax-r.PriceMin), priceStr(last, r.PriceMax-r.PriceMin),
 			(last-first)/first*10000)
 	}
-	switch wanted {
-	case 0:
+	paper := len(r.Paper) > 0
+	switch {
+	case wanted == 0:
 		note += " The model asked to wait on every one of them, so nothing here would have been a trade."
+	case paper:
+		note += fmt.Sprintf(" On %d of them the model asked to enter or exit — ringed, with a rule "+
+			"through the plot. What each one actually did is in the paper section below.", wanted)
 	default:
 		note += fmt.Sprintf(" On %d of them the model asked to enter or exit — ringed, with a rule "+
 			"through the plot. Shadow mode fills none of it; the gate column says what would have "+
 			"stopped each one.", wanted)
+	}
+	filled, held := 0, 0
+	for _, t := range r.Recent {
+		if t.Filled {
+			filled++
+		}
+		if t.Held {
+			held++
+		}
+	}
+	if filled > 0 || held > 0 {
+		note += fmt.Sprintf(" %d execution(s) here, marked with a diamond; the band along the "+
+			"foot is the %d tick(s) a position was open.", filled, held)
 	}
 	if failed > 0 {
 		note += fmt.Sprintf(" %d call(s) in this window failed and have no answer.", failed)
@@ -645,6 +744,21 @@ func svgPrice(ticks []Tick, lo, hi float64) template.HTML {
 			padL-8, gy+4, priceStr(hi-span*float64(i)/4, span))
 	}
 
+	// A band along the foot of the plot for the stretches a position was
+	// actually held. It sits under everything: it is context for the line, not
+	// a series of its own.
+	for i, t := range ticks {
+		if !t.Held {
+			continue
+		}
+		w := plotW / math.Max(float64(len(ticks)-1), 1)
+		if width > 0 && i+1 < len(ticks) {
+			w = x(i+1) - x(i)
+		}
+		fmt.Fprintf(b, `<rect x="%.1f" y="%.1f" width="%.1f" height="6" class="heldband"/>`,
+			x(i), padT+plotH-6, math.Max(w, 1))
+	}
+
 	// The call rules go down first so the price line reads over them.
 	for i, t := range ticks {
 		if !t.Wanted {
@@ -681,6 +795,12 @@ func svgPrice(ticks []Tick, lo, hi float64) template.HTML {
 		if t.Wanted {
 			fmt.Fprintf(b, `<circle cx="%.1f" cy="%.1f" r="5.5" class="callring"/>`, x(i), y(t.Price))
 		}
+		// A fill is a different event from a call, so it gets a different
+		// shape: a filled diamond, legible without colour beside a ring.
+		if t.Filled {
+			fmt.Fprintf(b, `<path d="M %.1f %.1f l 5 5 l -5 5 l -5 -5 Z" class="fillmark"><title>%s</title></path>`,
+				x(i), y(t.Price)-5, template.HTMLEscapeString("executed at "+t.At.Format("15:04:05")))
+		}
 	}
 
 	fmt.Fprintf(b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="baseline"/>`,
@@ -691,6 +811,67 @@ func svgPrice(ticks []Tick, lo, hi float64) template.HTML {
 		padL+plotW/2, h-10, len(ticks))
 	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="end">%s</text>`,
 		chartW-padR, h-10, template.HTMLEscapeString(tn.Format("15:04:05")))
+	b.WriteString(`</svg>`)
+	return template.HTML(b.String())
+}
+
+// svgPaths draws gross and net per path as a paired bar, zero-centred.
+//
+// The pair is the message: a gross bar well above zero beside a net bar below
+// it is a strategy that was right and still lost, which is the specific
+// failure CLAUDE.md predicts for anything taking liquidity at 24bps a round
+// trip. Both bars use the one series hue; they are told apart by position and
+// by their labels, never by colour.
+func svgPaths(paths []Path) template.HTML {
+	if len(paths) == 0 {
+		return ""
+	}
+	rowH, barH := 54.0, 16.0
+	h := padT + float64(len(paths))*rowH + 26
+	labelW := 92.0
+	b := svgOpen(chartW, h)
+
+	span := 0.0
+	for _, p := range paths {
+		span = math.Max(span, math.Max(math.Abs(p.GrossJPY), math.Abs(p.NetJPY)))
+	}
+	if span <= 0 {
+		span = 1 // nothing has happened yet; draw the axis, not a divide by zero
+	}
+	// A wide right gutter: the value labels sit outside the plot and
+	// "gross -10.22 JPY" is ~95px of type at this size.
+	plotW := chartW - labelW - padR - 130
+	zero := labelW + plotW/2
+
+	for i, p := range paths {
+		y := padT + float64(i)*rowH
+		fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="label" text-anchor="end">%s</text>`,
+			labelW-10, y+22, template.HTMLEscapeString(p.Style))
+
+		for j, v := range []struct {
+			name string
+			val  float64
+		}{{"gross", p.GrossJPY}, {"net", p.NetJPY}} {
+			by := y + float64(j)*(barH+4)
+			w := plotW / 2 * math.Abs(v.val) / span
+			x := zero
+			if v.val < 0 {
+				x = zero - w
+			}
+			tip := fmt.Sprintf("%s %s: %s", p.Style, v.name, jpy(v.val))
+			fmt.Fprintf(b, `<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="2" class="mark" `+
+				`tabindex="0" data-tip="%s"><title>%s</title></rect>`,
+				x, by, math.Max(w, 1.5), barH, template.HTMLEscapeString(tip), template.HTMLEscapeString(tip))
+			fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="value">%s %s</text>`,
+				zero+plotW/2+8, by+12, template.HTMLEscapeString(v.name), jpy(v.val))
+		}
+	}
+
+	// The zero line is a reference, not a series.
+	fmt.Fprintf(b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="ref"/>`,
+		zero, padT-4, zero, h-22)
+	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="reflabel" text-anchor="middle">break even</text>`,
+		zero, h-8)
 	b.WriteString(`</svg>`)
 	return template.HTML(b.String())
 }
