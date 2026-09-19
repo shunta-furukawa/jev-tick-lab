@@ -467,6 +467,37 @@ A whole is not optional housekeeping: diffs only cover ~200 levels from the
 best bid and ask, so the periodic whole is the only thing that drops a level
 that fell out of range.
 
+**xrp_jpy barely moves, and that is the central problem with the pair.**
+Measured over 124 consecutive seconds on 2026-09-19 against the live book:
+
+| | |
+|---|---|
+| mid moved | **0.45 bps in total**, over two minutes |
+| mid changed at all | 5% of one-second samples (the last price, 6%) |
+| longest stretch with the last price unchanged | 25s |
+| spread | **0.04 bps** — one tick, 0.001 yen |
+| realised 60s volatility | fell to **0.0 bps** |
+
+So a flat-looking price chart is not a rendering fault and not a last-trade
+artefact: the mid is just as still as the last print, and the market really did
+sit on one tick for tens of seconds at a stretch. Two consequences, and both
+matter more than the chart does.
+
+**The round trip costs 24 bps and the pair moves under 1 bps a minute.** No
+amount of predictive accuracy pays a toll fifty times larger than the thing
+being predicted. The taker path exists to measure that, not to beat it.
+
+**It is probably why the anomaly gate fires so often.** When realised
+volatility rounds to 0.0 bps and `Return 60s` reads +0.000%, the state text
+describes a venue that is not trading — which is the exact shape that made
+preflight score a healthy book at `anomalous` 0.54. A live paper run measured
+`gate=anomaly` on 31% of ticks. Before treating that as a threshold to tune,
+check whether the state text is simply describing a dead market accurately.
+
+The price chart's y-axis is therefore floored at the round-trip cost
+(`Options.BandBps`), so a quiet market renders as a flat line instead of a
+mountain range. See `TestAQuietMarketLooksQuietRatherThanDramatic`.
+
 **Trades are sparse.** Over a 30s sample, `btc_jpy` printed once and `xrp_jpy`
 not at all. The 1s bar series is therefore continuous in wall-clock seconds
 with carried-forward closes, not one bar per print — otherwise "the last 60
@@ -617,6 +648,7 @@ means it typechecks, has tests against a fake, and has never met production.
 | the shadow path end to end | ✅ 195 records over 10 min: 100% tick density, zero failed calls, zero holes, logcheck HEALTHY |
 | `decide` against real answers | ⚠️ runs clean, but the anomaly gate's threshold is still unexamined — see below |
 | `cmd/fill`, `cmd/calib` | ❌ synthetic input only |
+| how much xrp_jpy actually moves | ✅ **measured 2026-09-19**: mid moved 0.45bps over 124s, spread 0.04bps, 60s volatility down to 0.0bps. See "bitbank specifics" |
 | `marketstate.Ladder`, `TradesAfter` | ✅ 35 min live: ~200 levels a side, zero crossed books, zero out-of-order levels, zero duplicated or replayed prints |
 | the fill simulator | ⚠️ unit tested hard, including the 24bps round trip — but it has never seen a live market, because that needs an API key and a running phase 4 |
 | bitbank request signing | ✅ matches all four of the vendor's published vectors |

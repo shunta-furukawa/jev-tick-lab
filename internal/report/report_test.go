@@ -289,7 +289,7 @@ func TestTapePositionsEveryTickByTheTimeItHappened(t *testing.T) {
 		t.Fatalf("price range = %v..%v", rep.PriceMin, rep.PriceMax)
 	}
 
-	svg := string(svgPrice(rep.Recent, rep.PriceMin, rep.PriceMax))
+	svg := string(svgPrice(rep.Recent, rep.PriceMin, rep.PriceMax, 24))
 	if strings.Count(svg, "<circle") < len(rep.Recent) {
 		t.Errorf("want one dot per tick, got %d circles for %d ticks",
 			strings.Count(svg, "<circle"), len(rep.Recent))
@@ -328,7 +328,7 @@ func TestTapeMarksWhatTheModelWantedRatherThanTradesItNeverMade(t *testing.T) {
 	if wanted != 2 {
 		t.Fatalf("wanted ticks = %d, want 2", wanted)
 	}
-	if rings := strings.Count(string(svgPrice(rep.Recent, rep.PriceMin, rep.PriceMax)), "callring"); rings != 2 {
+	if rings := strings.Count(string(svgPrice(rep.Recent, rep.PriceMin, rep.PriceMax, 24)), "callring"); rings != 2 {
 		t.Errorf("rings = %d, want 2", rings)
 	}
 
@@ -344,7 +344,7 @@ func TestAFlatWindowDoesNotDivideByZero(t *testing.T) {
 	t.Parallel()
 	// Every tick at the same price: the scale has no span to work with.
 	rep := Build(records(10), DefaultOptions())
-	svg := string(svgPrice(rep.Recent, rep.PriceMin, rep.PriceMax))
+	svg := string(svgPrice(rep.Recent, rep.PriceMin, rep.PriceMax, 24))
 	if svg == "" {
 		t.Fatal("no chart for a flat window")
 	}
@@ -604,4 +604,78 @@ func TestAnUnknownIdFallsBackToItselfRatherThanVanishing(t *testing.T) {
 	if got := gateLabelJA("some_new_gate"); got != "some_new_gate" {
 		t.Errorf("unknown gate rendered as %q, want the raw id", got)
 	}
+}
+
+func TestAQuietMarketLooksQuietRatherThanDramatic(t *testing.T) {
+	t.Parallel()
+	// xrp_jpy moved 0.45bps over two minutes when this was measured. Fitting
+	// the axis to that turns single ticks into cliffs, which is the opposite
+	// of what the chart is for: the question is always "did it move enough to
+	// pay the round trip", and a frame that magnifies 0.45bps to full height
+	// answers it wrongly.
+	const cost = 24.0
+	base := 222.600
+	quiet := make([]Tick, 60)
+	for i := range quiet {
+		quiet[i] = Tick{At: t0.Add(time.Duration(i) * time.Second), Price: base + float64(i%2)*0.001}
+	}
+	lo, hi := base, base+0.001
+
+	svg := string(svgPrice(quiet, lo, hi, cost))
+	ys := dotYs(t, svg)
+	spread := maxOf(ys) - minOf(ys)
+
+	// One tick of 0.001 on 222.6 is 0.045bps. Against a 24bps frame that is a
+	// fortieth of the plot height, not a mountain.
+	if spread > 12 {
+		t.Errorf("a 0.045bps wiggle spans %.1fpx of the plot; the axis is not floored at the round-trip cost", spread)
+	}
+
+	// And a move that COULD pay for itself has to be clearly visible, or the
+	// floor has been set so wide that nothing ever reads as significant.
+	big := make([]Tick, 60)
+	for i := range big {
+		big[i] = Tick{At: t0.Add(time.Duration(i) * time.Second), Price: base * (1 + float64(i)*cost/10000/59)}
+	}
+	bigSpread := maxOf(dotYs(t, string(svgPrice(big, big[0].Price, big[len(big)-1].Price, cost)))) -
+		minOf(dotYs(t, string(svgPrice(big, big[0].Price, big[len(big)-1].Price, cost))))
+	if bigSpread < 100 {
+		t.Errorf("a full round-trip move spans only %.1fpx; the floor is too wide to read", bigSpread)
+	}
+}
+
+func dotYs(t *testing.T, svg string) []float64 {
+	t.Helper()
+	var out []float64
+	for _, m := range regexp.MustCompile(`<circle cx="[0-9.]+" cy="([0-9.]+)"[^>]*class="tickdot"`).FindAllStringSubmatch(svg, -1) {
+		v, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		t.Fatal("no dots in the chart")
+	}
+	return out
+}
+
+func minOf(v []float64) float64 {
+	m := v[0]
+	for _, x := range v {
+		if x < m {
+			m = x
+		}
+	}
+	return m
+}
+
+func maxOf(v []float64) float64 {
+	m := v[0]
+	for _, x := range v {
+		if x > m {
+			m = x
+		}
+	}
+	return m
 }

@@ -313,9 +313,25 @@ func (r Report) chartPanel() panel {
 		"点の間隔がそのまま%sの評価間隔になります。間隔が空いていれば、そこは評価できなかった回です。",
 		len(r.Recent), jaDuration(cadence))
 	if first, last := firstLastPrice(r.Recent); first > 0 && last > 0 {
-		note += fmt.Sprintf(" 価格は %s → %s（%s）。",
+		swing := 0.0
+		if r.PriceMin > 0 {
+			swing = (r.PriceMax - r.PriceMin) / r.PriceMin * 10000
+		}
+		note += fmt.Sprintf(" 価格は%s → %s（%s bps、この間の高値と安値の幅は%.1f bps）。",
 			priceStr(first, r.PriceMax-r.PriceMin), priceStr(last, r.PriceMax-r.PriceMin),
-			bpsStr((last-first)/first*10000)+" bps")
+			bpsStr((last-first)/first*10000), swing)
+		// The y-axis is floored at the round-trip cost, so say what that means.
+		// Otherwise a flat line reads as a broken chart rather than as a market
+		// that did not move far enough to be worth trading.
+		if cost := r.Options.BandBps; cost > 0 {
+			note += fmt.Sprintf("縦軸は最低でも往復手数料%.0f bpsぶんの幅を取ってあるので、"+
+				"線が平らなら本当に動いていないという意味です", cost)
+			if swing > 0 && swing < cost {
+				note += fmt.Sprintf("——この間の値幅は手数料の%.0f%%しかなく、"+
+					"どんなに予測が当たっても往復では足が出ます", swing/cost*100)
+			}
+			note += "。"
+		}
 	}
 	switch {
 	case wanted == 0:
@@ -337,7 +353,7 @@ func (r Report) chartPanel() panel {
 	return panel{
 		Title:      "値動きと売買（1回ごと）",
 		Note:       note,
-		SVG:        svgPrice(r.Recent, r.PriceMin, r.PriceMax),
+		SVG:        svgPrice(r.Recent, r.PriceMin, r.PriceMax, r.Options.BandBps),
 		Extra:      chartLegend(wanted > 0, filled > 0 || held > 0),
 		BelowTitle: tape.Name + " — " + tape.Note,
 		Below:      tape.HTML,
@@ -835,7 +851,7 @@ func svgReliability(c calib.Report) template.HTML {
 // Ticks where the model asked for an entry or an exit are marked with a rule
 // and a ring. Both are shape, never hue: this page's two status colours are
 // four Delta E apart under deuteranopia and may not carry meaning alone.
-func svgPrice(ticks []Tick, lo, hi float64) template.HTML {
+func svgPrice(ticks []Tick, lo, hi, costBps float64) template.HTML {
 	if len(ticks) == 0 || hi <= 0 {
 		return ""
 	}
@@ -845,17 +861,24 @@ func svgPrice(ticks []Tick, lo, hi float64) template.HTML {
 	plotW := chartW - padL - padR
 	plotH := h - padT - padB
 
-	// A flat window would otherwise divide by zero and draw a line on the axis.
-	// Give it a visible band instead, so "nothing moved" looks like nothing
-	// moved rather than like missing data.
+	// The y-axis never zooms tighter than the round-trip cost.
+	//
+	// Auto-scaling to whatever happened is what makes a dead market look like
+	// a mountain range: xrp_jpy moved 0.45bps over two minutes on 2026-09-19,
+	// and a frame fitted to that magnifies single ticks into cliffs. The floor
+	// is the cost of a round trip because a move smaller than that could not
+	// have been traded profitably however well it was predicted — so a chart
+	// that makes it look large is lying about the only thing that matters.
+	mid := (lo + hi) / 2
 	span := hi - lo
-	if span <= 0 {
-		span = math.Max(hi*0.0001, 0.0001)
-		lo, hi = hi-span/2, hi+span/2
+	if floor := mid * costBps / 10000; span < floor {
+		span = floor
 	}
-	pad := span * 0.15
-	lo, hi = lo-pad, hi+pad
-	span = hi - lo
+	if span <= 0 {
+		span = math.Max(mid*0.0001, 0.0001)
+	}
+	span *= 1.15 // breathing room above and below
+	lo, hi = mid-span/2, mid+span/2
 
 	y := func(p float64) float64 { return padT + plotH*(hi-p)/span }
 
@@ -892,6 +915,16 @@ func svgPrice(ticks []Tick, lo, hi float64) template.HTML {
 		}
 		fmt.Fprintf(b, `<rect x="%.1f" y="%.1f" width="%.1f" height="6" class="heldband"/>`,
 			x(i), padT+plotH-6, math.Max(w, 1))
+	}
+
+	// The opening price, as a reference. With a fixed minimum span the line's
+	// distance from it is directly readable as "did this move enough to pay
+	// for itself".
+	if first, _ := firstLastPrice(ticks); first > 0 {
+		fmt.Fprintf(b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="ref"/>`,
+			padL, y(first), chartW-padR, y(first))
+		fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="reflabel" text-anchor="end">`+
+			`この画面の高さ = 往復手数料 %.0fbps ぶん</text>`, chartW-padR, padT-3, costBps)
 	}
 
 	// The call rules go down first so the price line reads over them.
