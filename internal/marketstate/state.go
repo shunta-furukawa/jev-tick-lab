@@ -66,6 +66,11 @@ type Bar struct {
 
 // Trade is a single execution from the transactions room.
 type Trade struct {
+	// ID is bitbank's transaction_id. It is the only safe cursor into the
+	// print stream: timestamps are milliseconds and several prints routinely
+	// share one, so a consumer that resumes from "after time t" either drops
+	// the rest of that millisecond or replays it.
+	ID     int64
 	At     time.Time
 	Side   string // "buy" | "sell" (taker side)
 	Price  float64
@@ -381,6 +386,7 @@ func (b *Book) ApplyTransactions(raw json.RawMessage) error {
 
 	for _, x := range t.Transactions {
 		tr := Trade{
+			ID:     x.TransactionID,
 			At:     time.UnixMilli(x.ExecutedAt).UTC(),
 			Side:   x.Side,
 			Price:  f(x.Price),

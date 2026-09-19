@@ -4,7 +4,7 @@
 //
 //	observe  stream + state only, no model calls        (phase 1)
 //	shadow   stream + Jev + full logging, NO trading    (phase 2, the default)
-//	paper    shadow + simulated fills                   (phase 4, not implemented)
+//	paper    shadow + simulated fills, no real orders   (phase 4)
 //	live     real orders                                (phase 5, not implemented)
 package main
 
@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/shunta-furukawa/jev-tick-lab/internal/decide"
+	"github.com/shunta-furukawa/jev-tick-lab/internal/exec"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/jev"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/marketstate"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/obs"
@@ -46,22 +47,34 @@ func main() {
 		// Watching a collection through three CLI tools is a chore, and a chore
 		// you will not do is a collection you are not really watching.
 		serve = flag.String("serve", "", "also serve the live dashboard here, e.g. 127.0.0.1:8080")
+
+		// Paper mode only. Sizes and fees are configuration because both move:
+		// the bitbank maker rebate is a campaign, and a simulator with either
+		// welded in keeps reporting a strategy that stopped existing.
+		notional     = flag.Float64("notional-jpy", 10000, "paper: size of one entry, in yen")
+		orderLatency = flag.Duration("order-latency", 150*time.Millisecond, "paper: round trip to bitbank; an order does not exist until it arrives")
+		makerTimeout = flag.Duration("maker-timeout", 30*time.Second, "paper: cancel a resting order that has not filled")
+		crossAfter   = flag.Bool("cross-after-timeout", false, "paper: take the spread when a maker entry times out")
 	)
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if err := run(log, *pair, *mode, *model, *logDir, *tick, *timeout, *minHist, *printState, *serve); err != nil {
+	paperCfg := exec.DefaultConfig(*pair)
+	paperCfg.NotionalJPY = *notional
+	paperCfg.Latency = *orderLatency
+	paperCfg.MakerTimeout = *makerTimeout
+	paperCfg.CrossAfterTimeout = *crossAfter
+
+	if err := run(log, *pair, *mode, *model, *logDir, *tick, *timeout, *minHist, *printState, *serve, paperCfg); err != nil {
 		log.Error("exiting", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minHist time.Duration, printState bool, serveAddr string) error {
+func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minHist time.Duration, printState bool, serveAddr string, paperCfg exec.Config) error {
 	switch mode {
-	case "observe", "shadow":
-	case "paper":
-		return fmt.Errorf("paper mode is not implemented; see CLAUDE.md phase 4")
+	case "observe", "shadow", "paper":
 	case "live":
 		return fmt.Errorf("live mode is not implemented; see CLAUDE.md phase 5")
 	default:
@@ -113,6 +126,10 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 		revision, buildTime, modified := obs.BuildInfo()
 		log.Info("build", "revision", revision, "modified", modified)
 
+		var paper *exec.Config
+		if mode == "paper" {
+			paper = &paperCfg
+		}
 		if err := logger.WriteRun(obs.Run{
 			RunID:          runID,
 			StartedAt:      started,
@@ -127,6 +144,7 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 			QuestionIDs:    jev.IDs(questions),
 			QuestionsHash:  obs.HashQuestions(questions),
 			Questions:      questions,
+			Paper:          paper,
 		}); err != nil {
 			return fmt.Errorf("write run header: %w", err)
 		}
@@ -162,8 +180,22 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 	client := jev.New(apiKey, model)
 
 	// Position is flat here only because shadow mode never trades. In live mode
-	// this MUST be reconciled from the exchange before the first tick.
+	// this MUST be reconciled from the exchange before the first tick — see
+	// rule 7 in CLAUDE.md. Paper mode owns its position inside the trader,
+	// which starts flat because nothing it simulates is real.
 	var position marketstate.Position
+
+	var trader *exec.Trader
+	if mode == "paper" {
+		trader = exec.NewTrader(paperCfg, thresholds)
+		trader.SeedCursor(book.LatestTradeID())
+		log.Info("paper mode",
+			"notional_jpy", paperCfg.NotionalJPY,
+			"maker_bps", paperCfg.Fees.MakerBps, "taker_bps", paperCfg.Fees.TakerBps,
+			"order_latency", paperCfg.Latency.String(),
+			"maker_timeout", paperCfg.MakerTimeout.String(),
+			"allow_short", paperCfg.AllowShort)
+	}
 
 	// inFlight guarantees at most one outstanding evaluation. If a call is slow,
 	// the tick is skipped rather than queued — a queued answer describes a market
@@ -174,6 +206,20 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 
+	// Fills are pumped far more often than decisions are taken. An order
+	// submitted at t fills against the book as it actually moved, not against
+	// whatever it happened to be at the next evaluation — at a 3s cadence that
+	// difference is most of the fill.
+	var pumpC <-chan time.Time
+	if trader != nil {
+		pump := time.NewTicker(100 * time.Millisecond)
+		defer pump.Stop()
+		pumpC = pump.C
+	}
+	// A nil channel blocks forever in a select, so outside paper mode the arm
+	// is simply never taken — rather than firing against a nil trader, which
+	// would panic in the one loop CLAUDE.md says must never panic.
+
 	log.Info("started", "run_id", runID, "pair", pair, "mode", mode, "model", model, "tick", tick.String())
 
 	// Warmup transitions are logged once each, not every second: a feed that
@@ -183,9 +229,32 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 	for {
 		select {
 		case <-ctx.Done():
+			if trader != nil {
+				// Cancel working orders, but never close open positions: a run
+				// that liquidates on Ctrl-C reports a P&L that depended on when
+				// you pressed it.
+				for _, c := range trader.Flatten(time.Now().UTC(), "shutdown") {
+					recordCancel(log, logger, runID, pair, mode, c)
+				}
+				for _, st := range trader.State(0) {
+					log.Info("paper result", "style", st.Style,
+						"round_trips", st.RoundTrip, "wins", st.Wins,
+						"net_jpy", st.NetJPY, "fees_jpy", st.FeesJPY,
+						"open", !st.Position.IsFlat())
+				}
+			}
 			log.Info("shutting down", "run_id", runID, "evaluated", evaluated.Load(), "skipped", skipped.Load())
 			// In live mode, flatten here before returning.
 			return nil
+
+		case at := <-pumpC:
+			execs, cancels := trader.Pump(book, at.UTC())
+			for _, e := range execs {
+				recordFill(log, logger, runID, pair, mode, e)
+			}
+			for _, c := range cancels {
+				recordCancel(log, logger, runID, pair, mode, c)
+			}
 
 		case now := <-ticker.C:
 			snap := book.Snapshot(now.UTC())
@@ -231,6 +300,14 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 				continue
 			}
 
+			// The state text has to describe the position the model is being
+			// asked about. In paper mode that is the trader's, not the flat
+			// placeholder shadow mode uses.
+			pos := position
+			if trader != nil {
+				pos = trader.Position()
+			}
+
 			go func(now time.Time, snap marketstate.Snapshot, pos marketstate.Position) {
 				defer inFlight.Store(false)
 				evaluate(ctx, log, client, logger, questions, thresholds, now, snap, pos, evalOpts{
@@ -238,9 +315,10 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 					model:   model,
 					mode:    mode,
 					timeout: timeout,
+					trader:  trader,
 				})
 				evaluated.Add(1)
-			}(now.UTC(), snap, position)
+			}(now.UTC(), snap, pos)
 		}
 	}
 }
@@ -250,6 +328,11 @@ type evalOpts struct {
 	model   string
 	mode    string
 	timeout time.Duration
+
+	// trader is nil outside paper mode. When it is set it owns the position
+	// and the gating, because the gates that read a position must see the
+	// path's real one.
+	trader *exec.Trader
 }
 
 func evaluate(
@@ -303,7 +386,24 @@ func evaluate(
 	rec.Answers = resp.Answers
 	rec.InputTokens = resp.Usage.InputTokens
 	rec.OutputTokens = resp.Usage.OutputTokens
-	rec.Signal = decide.Compose(now, time.Now().UTC(), snap, resp.Answers, pos, thresholds)
+
+	decidedAt := time.Now().UTC()
+	if opts.trader == nil {
+		rec.Signal = decide.Compose(now, decidedAt, snap, resp.Answers, pos, thresholds)
+	} else {
+		// The trader composes once per execution path, because the maker and
+		// taker books diverge and the position gates must see the truth for
+		// the path they gate. The record carries the taker path's signal and
+		// the position it was composed against, so it still re-scores exactly.
+		var problems []error
+		rec.Signal, rec.Position, problems = opts.trader.Decide(now, decidedAt, snap, resp.Answers)
+		rec.Paper = opts.trader.State(snap.Last)
+		for _, p := range problems {
+			// A short on spot is the expected one: the model is asked a
+			// symmetric question and half the market is not tradeable here.
+			log.Warn("order not placed", "err", p, "intent", rec.Signal.Intent)
+		}
+	}
 
 	if err := logger.Write(rec); err != nil {
 		log.Error("log write", "err", err)
@@ -321,9 +421,10 @@ func evaluate(
 		"model", resp.Model,
 	)
 
-	// Phase 4 hands rec.Signal to the paper executor here. Nothing consumes it
-	// in shadow mode by design: phase 2 answers the interesting question
-	// without any execution code at all.
+	// Fills are not applied here. The trader is pumped from the tick loop at
+	// 100ms, because an order submitted now fills against the book as it
+	// actually moves — not against whatever it happens to be at the next
+	// evaluation, which at a 3s cadence would be most of the fill.
 }
 
 func ingest(ctx context.Context, log *slog.Logger, sc *stream.Client, book *marketstate.Book, pair string) {
@@ -358,4 +459,51 @@ func ingest(ctx context.Context, log *slog.Logger, sc *stream.Client, book *mark
 			}
 		}
 	}
+}
+
+// recordFill writes one simulated execution to the fills log and says so in
+// the journal. A fill that only exists in memory is not a result.
+func recordFill(log *slog.Logger, logger *obs.Logger, runID, pair, mode string, e exec.Execution) {
+	f := e.Fill
+	rec := obs.FillRecord{
+		RunID: runID, At: f.At, Pair: pair, Mode: mode,
+		Style: string(f.Style), Side: f.Side, Intent: string(f.Intent), OrderID: f.OrderID,
+		Price: f.Price, Size: f.Size, Notional: f.Notional,
+		FeeJPY: f.FeeJPY, SlipBps: f.SlipBps, WaitedMs: f.WaitedMs,
+	}
+	if e.Closed != nil {
+		rec.NetJPY, rec.NetBps, rec.HeldSec = e.Closed.NetJPY, e.Closed.NetBps, e.Closed.HeldSec
+	}
+	if err := logger.WriteFill(rec); err != nil {
+		log.Error("fill log write", "err", err)
+	}
+
+	args := []any{
+		"style", rec.Style, "side", rec.Side, "intent", rec.Intent,
+		"price", rec.Price, "size", rec.Size, "fee_jpy", rec.FeeJPY,
+	}
+	if f.Style == exec.Maker {
+		args = append(args, "waited_ms", rec.WaitedMs)
+	} else {
+		args = append(args, "slip_bps", rec.SlipBps)
+	}
+	if e.Closed != nil {
+		args = append(args, "net_jpy", rec.NetJPY, "net_bps", rec.NetBps, "held_s", rec.HeldSec)
+	}
+	log.Info("fill", args...)
+}
+
+// recordCancel writes an order that never filled. These are the whole point of
+// simulating a maker path: the trades a passive strategy simply does not get
+// are invisible everywhere else.
+func recordCancel(log *slog.Logger, logger *obs.Logger, runID, pair, mode string, c exec.Cancel) {
+	rec := obs.FillRecord{
+		RunID: runID, At: c.At, Pair: pair, Mode: mode,
+		Style: string(c.Style), OrderID: c.OrderID,
+		Cancelled: true, Unfilled: c.Unfilled, Reason: c.Reason,
+	}
+	if err := logger.WriteFill(rec); err != nil {
+		log.Error("fill log write", "err", err)
+	}
+	log.Info("cancelled", "style", rec.Style, "unfilled", rec.Unfilled, "reason", rec.Reason)
 }

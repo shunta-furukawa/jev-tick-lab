@@ -37,9 +37,14 @@ func diff(seq uint64, ts time.Time, bids, asks [][2]string) json.RawMessage {
 
 func txs(trades ...Trade) json.RawMessage {
 	list := make([]map[string]any, 0, len(trades))
-	for _, tr := range trades {
+	for i, tr := range trades {
+		// Distinct ids by default. They used to all be 1, which no test
+		// noticed until the fill simulator started cursoring on them.
+		if tr.ID == 0 {
+			tr.ID = int64(i + 1)
+		}
 		list = append(list, map[string]any{
-			"transaction_id": 1,
+			"transaction_id": tr.ID,
 			"side":           tr.Side,
 			"price":          fmt.Sprintf("%g", tr.Price),
 			"amount":         fmt.Sprintf("%g", tr.Amount),

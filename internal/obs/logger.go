@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/shunta-furukawa/jev-tick-lab/internal/decide"
+	"github.com/shunta-furukawa/jev-tick-lab/internal/exec"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/jev"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/marketstate"
 )
@@ -53,6 +54,13 @@ type Record struct {
 	// Outputs.
 	Answers map[string]jev.Answer `json:"answers"`
 	Signal  decide.Signal         `json:"signal"`
+
+	// Paper is the state of each execution path, set only in paper mode.
+	// Signal above is composed against the TAKER path's position, which is
+	// what Position carries, so a logged record still re-scores exactly. The
+	// maker path diverges — an entry that never filled leaves it flat — so its
+	// own position and gate are reported here rather than being lost.
+	Paper []exec.StyleState `json:"paper,omitempty"`
 
 	// Costs.
 	InputTokens  int     `json:"input_tokens"`
@@ -91,6 +99,11 @@ type Run struct {
 	QuestionIDs   []string                `json:"question_ids"`
 	QuestionsHash string                  `json:"questions_hash"`
 	Questions     map[string]jev.Question `json:"questions"`
+
+	// Paper is the fill model this run used, set only in paper mode. Fee
+	// schedules and latency assumptions change; a P&L recorded without the
+	// assumptions that produced it is a number nobody can check later.
+	Paper *exec.Config `json:"paper,omitempty"`
 }
 
 // BuildInfo reports the revision this binary was built from.
@@ -189,23 +202,67 @@ func (l *Logger) Write(r Record) error {
 	return l.w.Flush()
 }
 
+// FillRecord is one simulated execution. It lives in its own file because it
+// is a different grain from a tick: ticks are one per second whatever happens,
+// fills are sparse and each one is an event worth reading on its own.
+type FillRecord struct {
+	RunID   string    `json:"run_id"`
+	At      time.Time `json:"at"`
+	Pair    string    `json:"pair"`
+	Mode    string    `json:"mode"`
+	Style   string    `json:"style"`
+	Side    string    `json:"side"`
+	Intent  string    `json:"intent"`
+	OrderID string    `json:"order_id"`
+
+	Price    float64 `json:"price"`
+	Size     float64 `json:"size"`
+	Notional float64 `json:"notional_jpy"`
+	FeeJPY   float64 `json:"fee_jpy"`
+	SlipBps  float64 `json:"slip_bps"`
+	WaitedMs float64 `json:"waited_ms"`
+
+	// Set when this fill closed a position rather than opening one.
+	NetJPY  float64 `json:"net_jpy,omitempty"`
+	NetBps  float64 `json:"net_bps,omitempty"`
+	HeldSec float64 `json:"held_sec,omitempty"`
+
+	// Set on a cancel rather than a fill: the trades a passive strategy did
+	// not get are the most important thing this simulator produces.
+	Cancelled bool    `json:"cancelled,omitempty"`
+	Unfilled  float64 `json:"unfilled,omitempty"`
+	Reason    string  `json:"reason,omitempty"`
+}
+
+// WriteFill appends one execution to fills-YYYY-MM-DD.jsonl.
+func (l *Logger) WriteFill(r FillRecord) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.appendDaily("fills-"+r.At.UTC().Format("2006-01-02")+".jsonl", r)
+}
+
 // WriteRun appends the run header to runs-YYYY-MM-DD.jsonl.
 func (l *Logger) WriteRun(r Run) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.appendDaily("runs-"+r.StartedAt.UTC().Format("2006-01-02")+".jsonl", r)
+}
 
-	b, err := json.Marshal(r)
+// appendDaily writes one JSON line to a file in the log directory. Caller
+// holds the lock. Unlike the tick file it is opened per write: these are rare
+// enough that keeping a handle is not worth the rotation bookkeeping.
+func (l *Logger) appendDaily(name string, v any) error {
+	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	name := filepath.Join(l.dir, "runs-"+r.StartedAt.UTC().Format("2006-01-02")+".jsonl")
-	f, err := os.OpenFile(name, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(filepath.Join(l.dir, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	if _, err := f.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("write run header: %w", err)
+		return fmt.Errorf("write %s: %w", name, err)
 	}
 	return nil
 }
