@@ -186,7 +186,7 @@ After an hour, ask the question that matters:
 
 ```bash
 gcloud compute ssh jev-tick-lab --zone us-west1-b --tunnel-through-iap \
-  -- sudo -u jevbot /opt/jev-tick-lab/logcheck -dir /opt/jev-tick-lab/data -window 1h
+  -- sudo -u jevbot /opt/jev-tick-lab/logcheck -dir /opt/jev-tick-lab/data -tick 3s -window 1h
 ```
 
 ---

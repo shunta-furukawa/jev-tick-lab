@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -266,3 +268,137 @@ func get(t *testing.T, url string) string {
 	}
 	return string(b)
 }
+
+func TestTapePositionsEveryTickByTheTimeItHappened(t *testing.T) {
+	t.Parallel()
+	// A hole at the sixth tick: the chart must leave a gap where it is rather
+	// than close the ranks, or the cadence it claims to show is a fiction.
+	recs := records(40)
+	recs = append(recs[:6], recs[7:]...)
+
+	opt := DefaultOptions()
+	opt.RecentTicks = 40
+	rep := Build(recs, opt)
+
+	if len(rep.Recent) != len(recs) {
+		t.Fatalf("recent = %d ticks, want %d", len(rep.Recent), len(recs))
+	}
+	if rep.PriceMin <= 0 || rep.PriceMax < rep.PriceMin {
+		t.Fatalf("price range = %v..%v", rep.PriceMin, rep.PriceMax)
+	}
+
+	svg := string(svgPrice(rep.Recent, rep.PriceMin, rep.PriceMax))
+	if strings.Count(svg, "<circle") < len(rep.Recent) {
+		t.Errorf("want one dot per tick, got %d circles for %d ticks",
+			strings.Count(svg, "<circle"), len(rep.Recent))
+	}
+
+	// The x of the tick after the hole must sit two cadences past the one
+	// before it, not one.
+	xs := dotXs(t, svg)
+	before, after := xs[5], xs[6]
+	step := xs[1] - xs[0]
+	if gap := after - before; gap < 1.9*step || gap > 2.1*step {
+		t.Errorf("gap across the missing tick = %.1f, want ~2 steps of %.1f", gap, step)
+	}
+}
+
+func TestTapeMarksWhatTheModelWantedRatherThanTradesItNeverMade(t *testing.T) {
+	t.Parallel()
+	// Shadow mode fills nothing. Claiming a trade here would be the one thing
+	// on this page that is not in the record.
+	recs := records(20, func(i int, r *obs.Record) {
+		if i == 3 || i == 11 {
+			r.Answers[jev.QAction] = jev.Answer{Type: "choice", Choice: jev.ActionBuy,
+				Confidence: 0.7, Probabilities: map[string]float64{jev.ActionBuy: 0.7}}
+		}
+	})
+	opt := DefaultOptions()
+	opt.RecentTicks = 20
+	rep := Build(recs, opt)
+
+	wanted := 0
+	for _, tk := range rep.Recent {
+		if tk.Wanted {
+			wanted++
+		}
+	}
+	if wanted != 2 {
+		t.Fatalf("wanted ticks = %d, want 2", wanted)
+	}
+	if rings := strings.Count(string(svgPrice(rep.Recent, rep.PriceMin, rep.PriceMax)), "callring"); rings != 2 {
+		t.Errorf("rings = %d, want 2", rings)
+	}
+
+	// And the section has to say so, in words, rather than leaving a reader to
+	// assume the rings were fills.
+	note := rep.priceSection().Note
+	if !strings.Contains(note, "Shadow mode fills none of it") {
+		t.Errorf("the note does not disclaim execution: %q", note)
+	}
+}
+
+func TestAFlatWindowDoesNotDivideByZero(t *testing.T) {
+	t.Parallel()
+	// Every tick at the same price: the scale has no span to work with.
+	rep := Build(records(10), DefaultOptions())
+	svg := string(svgPrice(rep.Recent, rep.PriceMin, rep.PriceMax))
+	if svg == "" {
+		t.Fatal("no chart for a flat window")
+	}
+	if strings.Contains(svg, "NaN") || strings.Contains(svg, "Inf") {
+		t.Errorf("chart has non-finite coordinates:\n%s", svg)
+	}
+}
+
+func TestBpsIsNeverSignedBelowItsOwnPrecision(t *testing.T) {
+	t.Parallel()
+	// "-0.0" reads as a fall. At one decimal place, this move has no direction.
+	if got := bpsStr(-0.004); got != "0.0" {
+		t.Errorf("bpsStr(-0.004) = %q, want %q", got, "0.0")
+	}
+	if got := bpsStr(1.24); got != "+1.2" {
+		t.Errorf("bpsStr(1.24) = %q, want %q", got, "+1.2")
+	}
+}
+
+// dotXs pulls the cx of every tick dot out of the chart, in order.
+func dotXs(t *testing.T, svg string) []float64 {
+	t.Helper()
+	var out []float64
+	for _, m := range regexp.MustCompile(`<circle cx="([0-9.]+)"[^>]*class="tickdot"`).FindAllStringSubmatch(svg, -1) {
+		v, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, v)
+	}
+	if len(out) < 8 {
+		t.Fatalf("found %d dots, want at least 8", len(out))
+	}
+	return out
+}
+
+func TestACadenceMismatchIsCalledOutRatherThanReportedAsBrokenCollection(t *testing.T) {
+	t.Parallel()
+	// records() writes a 3s series. Reading it at 1s — the local default —
+	// makes a perfect collection look a third full.
+	opt := DefaultOptions()
+	opt.TickInterval = time.Second
+	rep := Build(records(300), opt)
+
+	if rep.ObservedTick != 3*time.Second {
+		t.Fatalf("observed cadence = %s, want 3s", rep.ObservedTick)
+	}
+	if !strings.Contains(warnings(rep), "records are 3s apart") {
+		t.Errorf("no cadence warning; the page reports %s density instead", pct(rep.Density))
+	}
+
+	// Told the truth, it says nothing.
+	opt.TickInterval = 3 * time.Second
+	if w := warnings(Build(records(300), opt)); w != "" {
+		t.Errorf("warned on a matching cadence: %q", w)
+	}
+}
+
+func warnings(r Report) string { return strings.Join(r.view().Warnings, " | ") }

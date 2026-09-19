@@ -2,7 +2,11 @@
 // worth analysing?
 //
 //	go run ./cmd/logcheck -dir ./data -window 1h
-//	go run ./cmd/logcheck -dir /opt/jev-tick-lab/data -window 1h -json
+//	go run ./cmd/logcheck -dir /opt/jev-tick-lab/data -tick 3s -window 1h -json
+//
+// -tick must match the cadence the bot was started with. The VM runs 3s and a
+// local `make watch` runs 1s; checked against the wrong one, a healthy hour
+// reports as degraded.
 //
 // Exit status is the interface: 0 healthy, 1 degraded, 2 could not tell. A
 // systemd timer runs it hourly, so a degraded window turns into a failed unit

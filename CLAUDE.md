@@ -113,7 +113,7 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `internal/exec` | Fill simulation, order placement | Reading Jev answers directly — it consumes `decide.Signal` only |
 | `internal/calib` | Reliability bins, Brier, ECE, outcome definitions | Any I/O; `cmd/calib` reads the files |
 | `internal/health` | Whether a running collection is still producing usable data | Any I/O; `cmd/logcheck` reads the files and picks the exit code |
-| `internal/report` | Turning a tick log into a page: summaries, SVG, the HTML | Any I/O; `cmd/report` reads and writes the files |
+| `internal/report` | Turning a tick log into a page: summaries, the tick-by-tick tape, SVG, the HTML | Any I/O; `cmd/report` reads and writes the files. Claiming a trade — shadow mode fills nothing |
 
 | Command | Does |
 |---|---|
@@ -207,6 +207,15 @@ the collector has no idea it exists. A panicking HTTP handler is recovered by
 nothing to authenticate and no reason for a run to be reachable from the
 network.
 
+**The page shows what the model called, never a trade.** Shadow mode executes
+nothing, so the tick-by-tick section draws the price with one dot per
+evaluation and rings the ticks where the model asked to enter or exit. Placing
+the dots by timestamp rather than by index is the point of the chart: at a
+healthy cadence the spacing is even, so a skipped tick shows as a hole in the
+rhythm instead of being quietly closed up. `TestTapeMarksWhatTheModelWanted...`
+holds the line on the wording, because "10 trades" would be the one number on
+the page that is not in the record.
+
 **The report is one file with nothing outside it.** `cmd/report` writes a single
 HTML page — no CDN, no fonts, no external scripts — because it has to open from
 a laptop, from a GCS bucket, and from an archive in a year's time, which is the
@@ -281,7 +290,7 @@ A 1s cadence uses 60 rpm. TypeSafe warns these limits move without notice.
 | latency, one-shot | **561ms** — a cold call, TLS handshake included |
 | latency, steady state | **p50 232ms, p99 748ms** — measured in a live shadow run, where the HTTP connection is reused |
 | tokens | **1,926 in, 229 out** for a 1,330-byte state |
-| cost | **$0.000081/call — $2.33/day at 3s** |
+| cost | **$0.000081/call — $2.33/day at 3s, $7.00/day at 1s** |
 
 The batch is **not** re-tokenised per question: 1,926 tokens covers nine
 questions against a 3,863-byte request, so the vendor's "12.2x cheaper than
@@ -418,7 +427,7 @@ the hop short", and this does the opposite for the exchange. Why anyway:
 **Revisit before phase 4.** Simulated and real fills are about the round trip to
 bitbank, where 110ms is no longer a rounding error.
 
-### Evaluate every 3s, not every 1s — 2026-09-18
+### Evaluate every 3s on the VM, every 1s locally — 2026-09-18, amended 2026-09-19
 
 The model calls are ~90% of the bill and scale linearly with the cadence, so 1s
 to 3s takes a five-day run from about $27 to about $9.
@@ -429,9 +438,23 @@ still the right shape for the question phase 2 and 3 actually ask — is the
 confidence calibrated at all — and the forward-fill horizons (10s/60s/300s) all
 still land on real records, though +10s resolves to the tick at +12s.
 
+**Amended 2026-09-19: local runs go back to 1s.** The saving is real but small
+in absolute terms — $7.00/day against $2.33 — and a run someone is sitting and
+watching is the one place the premise at the top of this document is worth
+paying for in full. `make watch` passes `-tick 1s`; the VM keeps 3s, because it
+runs for days unattended and that is where the linear cost actually bites.
+`make run-shadow` also stays at 3s, so a local sanity check produces data the
+same shape as the VM's.
+
 Anything deriving an expected record count from the cadence has to be told:
 `deploy/run.sh` passes `-tick`, and the logcheck unit passes the same value. A
 3s bot checked against a 1s assumption reports every healthy hour as degraded.
+Two cadences in one project makes that easy to get wrong, so the report now
+measures the median gap between records and says so on the page when it
+disagrees with the `-tick` it was given — see `observedTick` in
+`internal/report`. That is a warning, never a silent correction: the mismatch
+is usually a wrong flag, but it can be a sick collector, and the two must not
+look the same.
 
 ---
 

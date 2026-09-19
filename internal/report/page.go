@@ -112,7 +112,8 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
 
   .warn { border: 1px solid var(--border); border-left: 3px solid var(--critical);
           background: var(--surface-1); border-radius: 8px; padding: 10px 14px;
-          margin: 0 0 22px; font-size: 13px; color: var(--text-secondary); }
+          margin: 0 0 10px; font-size: 13px; color: var(--text-secondary); }
+  .warn:last-of-type { margin-bottom: 22px; }
 
   .tiles { display: grid; gap: 10px; margin: 0 0 26px;
            grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); }
@@ -120,11 +121,13 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
           border-radius: 10px; padding: 12px 14px; }
   .tile .k { font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase;
              color: var(--muted); margin-bottom: 4px; }
-  .tile .v { font-size: 24px; font-weight: 600; letter-spacing: -0.02em;
+  /* Flex, not an inline dot: a status dot that wraps onto its own line is a
+     colour carrying meaning alone, which is the one thing it may never do. */
+  .tile .v { display: flex; align-items: center; gap: 6px;
+             font-size: 24px; font-weight: 600; letter-spacing: -0.02em;
              font-variant-numeric: tabular-nums; }
   .tile .n { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
-  .tile .v .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-                  margin-right: 6px; vertical-align: middle; }
+  .tile .v .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; }
   .dot.good { background: var(--good); }
   .dot.critical { background: var(--critical); }
 
@@ -143,7 +146,14 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
   .line { fill: none; stroke: var(--series-1); stroke-width: 2;
           stroke-linejoin: round; stroke-linecap: round; }
   .dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
-  .mark:hover, .mark:focus, .dot:hover, .dot:focus { fill: var(--text-primary); outline: none; }
+  .tickdot { fill: var(--series-1); }
+  /* A tick the model wanted to act on. Shape only — the ring and the rule read
+     the same to a viewer who cannot separate the hues. */
+  .callrule { stroke: var(--baseline); stroke-width: 1; stroke-dasharray: 3 3; }
+  .callring { fill: none; stroke: var(--series-1); stroke-width: 1.5; }
+  .mark:hover, .mark:focus, .dot:hover, .dot:focus,
+  .tickdot:hover, .tickdot:focus { fill: var(--text-primary); outline: none; }
+  .tickdot:hover, .tickdot:focus { r: 4; }
 
   details { margin: 6px 0 0; }
   summary { cursor: pointer; font-size: 12.5px; color: var(--text-secondary); padding: 4px 0; }
@@ -171,7 +181,7 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
     {{with .LiveNote}}<span class="fresh">{{.}}</span>{{end}}
   </div>
 
-  {{with .Warning}}<div class="warn">{{.}}</div>{{end}}
+  {{range .Warnings}}<div class="warn">{{.}}</div>{{end}}
 
   {{if .Tiles}}
   <div class="tiles">
@@ -190,8 +200,8 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
     <h2>{{.Title}}</h2>
     <p class="note">{{.Note}}</p>
     {{.SVG}}
-    <details>
-      <summary>Table view</summary>
+    <details{{if .Open}} open{{end}}>
+      <summary>{{if .Summary}}{{.Summary}}{{else}}Table view{{end}}</summary>
       <table>
         <thead><tr>{{range .Head}}<th>{{.}}</th>{{end}}</tr></thead>
         <tbody>{{range .Table}}<tr>{{range .}}<td>{{.}}</td>{{end}}</tr>{{end}}</tbody>

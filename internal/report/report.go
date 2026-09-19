@@ -27,6 +27,7 @@ type Options struct {
 	HorizonSec   int
 	BandBps      float64
 	Buckets      int     // timeline resolution
+	RecentTicks  int     // how many ticks the tape and the price chart show
 	PricePerMTok float64 // for the cost figure
 }
 
@@ -36,6 +37,7 @@ func DefaultOptions() Options {
 		HorizonSec:   60,
 		BandBps:      24, // an all-taker round trip on a JPY alt
 		Buckets:      48,
+		RecentTicks:  120,
 		PricePerMTok: 0.042,
 	}
 }
@@ -77,6 +79,25 @@ type Dist struct {
 	GateAbove bool // true when the gate fires ABOVE the threshold
 }
 
+// Tick is one evaluation, kept whole for the tape: what the market was doing,
+// what the model called, and what the gates did with it.
+type Tick struct {
+	At       time.Time
+	Price    float64
+	DeltaBps float64 // against the previous tick in the window
+	Action   string
+	Prob     float64
+	Conf     float64
+	Gate     string
+	Intent   string
+	Anomaly  float64
+	Error    string
+
+	// Wanted is true when the model called for an entry or an exit rather than
+	// waiting — the only thing that could ever have become a trade.
+	Wanted bool
+}
+
 // Report is everything the page draws.
 type Report struct {
 	Options Options
@@ -87,16 +108,25 @@ type Report struct {
 	From, To  time.Time
 	Generated time.Time
 
-	Records   int
-	Failed    int
-	FailRate  float64
-	Density   float64
-	Latency50 float64
-	Latency99 float64
+	Records int
+	Failed  int
+	// ObservedTick is the median gap between consecutive records — the cadence
+	// the data was actually collected at, as against the one Options claims.
+	ObservedTick time.Duration
+	FailRate     float64
+	Density      float64
+	Latency50    float64
+	Latency99    float64
 
 	InputTokens int
 	CostUSD     float64
 	CostPerDay  float64
+
+	// Recent is the tail of the log, tick by tick. Long enough to see the
+	// cadence in the spacing and short enough that each tick is its own mark.
+	Recent   []Tick
+	PriceMin float64
+	PriceMax float64
 
 	Timeline []Bucket
 	Gates    []Count
@@ -140,6 +170,9 @@ func Build(records []obs.Record, opt Options) Report {
 	}
 	if opt.Buckets <= 0 {
 		opt.Buckets = 48
+	}
+	if opt.RecentTicks <= 0 {
+		opt.RecentTicks = 120
 	}
 
 	rep := Report{Options: opt, Generated: time.Now().UTC()}
@@ -213,6 +246,8 @@ func Build(records []obs.Record, opt Options) Report {
 		rep.CostPerDay = rep.CostUSD / span * 86400
 	}
 
+	rep.ObservedTick = observedTick(sorted)
+	rep.Recent, rep.PriceMin, rep.PriceMax = recent(sorted, opt.RecentTicks)
 	rep.Timeline = timeline(sorted, rep.From, rep.To, opt)
 	rep.Gates = counts(gates, rep.Records-rep.Failed)
 	rep.Intents = counts(intents, rep.Records-rep.Failed)
@@ -230,6 +265,81 @@ func Build(records []obs.Record, opt Options) Report {
 		})
 	}
 	return rep
+}
+
+// observedTick is the median gap between consecutive records.
+//
+// Every count on this page that says "expected" is derived from the cadence the
+// caller passed in, and nothing else checks it. Local runs collect at 1s and the
+// VM at 3s, so the two get mixed up: a 3s log read at 1s reports every healthy
+// hour as degraded, and a 1s log read at 3s reports 300% density. The median is
+// used rather than the mean because a restart puts one enormous gap in the
+// series, and one gap must not move the answer.
+func observedTick(recs []obs.Record) time.Duration {
+	if len(recs) < 3 {
+		return 0
+	}
+	gaps := make([]float64, 0, len(recs)-1)
+	for i := 1; i < len(recs); i++ {
+		if d := recs[i].At.Sub(recs[i-1].At); d > 0 {
+			gaps = append(gaps, d.Seconds())
+		}
+	}
+	if len(gaps) == 0 {
+		return 0
+	}
+	sort.Float64s(gaps)
+	return time.Duration(gaps[len(gaps)/2] * float64(time.Second)).Round(100 * time.Millisecond)
+}
+
+// recent takes the tail of the log and turns it into the tape.
+func recent(recs []obs.Record, n int) ([]Tick, float64, float64) {
+	if len(recs) > n {
+		recs = recs[len(recs)-n:]
+	}
+	if len(recs) == 0 {
+		return nil, 0, 0
+	}
+
+	out := make([]Tick, 0, len(recs))
+	min, max := math.Inf(1), math.Inf(-1)
+	var prev float64
+
+	for _, rec := range recs {
+		t := Tick{
+			At:     rec.At.UTC(),
+			Price:  rec.Snapshot.Last,
+			Gate:   gateLabel(string(rec.Signal.Gate)),
+			Intent: string(rec.Signal.Intent),
+			Error:  rec.Error,
+		}
+		if a, ok := rec.Answers[jev.QAction]; ok {
+			t.Action, t.Conf = a.Choice, a.Confidence
+			t.Prob = a.Probabilities[a.Choice]
+			// Shadow mode never trades, so the honest thing to show is what
+			// the model called for, not a fill that was never going to happen.
+			t.Wanted = a.Choice != jev.ActionWait && a.Choice != ""
+		}
+		if a, ok := rec.Answers[jev.QAnomaly]; ok {
+			t.Anomaly = a.Noul
+		}
+		if rec.Error != "" {
+			t.Gate = "call failed"
+		}
+		if prev > 0 && t.Price > 0 {
+			t.DeltaBps = (t.Price - prev) / prev * 10000
+		}
+		if t.Price > 0 {
+			prev = t.Price
+			min = math.Min(min, t.Price)
+			max = math.Max(max, t.Price)
+		}
+		out = append(out, t)
+	}
+	if math.IsInf(min, 1) {
+		return out, 0, 0
+	}
+	return out, min, max
 }
 
 func timeline(recs []obs.Record, from, to time.Time, opt Options) []Bucket {

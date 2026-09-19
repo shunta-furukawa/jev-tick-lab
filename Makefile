@@ -6,7 +6,7 @@ help:
 	@echo "jev-tick-lab targets:"
 	@echo
 	@echo "  running"
-	@echo "    watch           collect AND serve the live dashboard, one command"
+	@echo "    watch           collect AND serve the live dashboard at 1s, one command"
 	@echo "    serve           just the dashboard, against ./data"
 	@echo "    run-observe     phase 1: stream and state only, no model calls, no key"
 	@echo "    run-shadow      phase 2: evaluate and log at the deployed 3s cadence"
@@ -40,8 +40,11 @@ build-all:
 run-observe:
 	go run ./cmd/bot -pair xrp_jpy -mode observe -print-state
 
+# The deployed cadence, so a local sanity check produces the same shape of data
+# the VM will. For watching it happen, use `make watch` — see the cadence note
+# in the Owner decisions section of CLAUDE.md.
 run-shadow:
-	go run ./cmd/bot -pair xrp_jpy -mode shadow -model jev-1.13.0 -log-dir ./data
+	go run ./cmd/bot -pair xrp_jpy -mode shadow -model jev-1.13.0 -tick 3s -log-dir ./data
 
 # Raw frames from the exchange, for re-checking the stream contract.
 dump:
@@ -49,21 +52,26 @@ dump:
 
 # Is the collection still producing a usable dataset?
 logcheck:
-	go run ./cmd/logcheck -dir ./data -window 1h
+	go run ./cmd/logcheck -dir ./data -tick 1s -window 1h
 
 # Collect and watch in one command: the dashboard is at http://127.0.0.1:8080
+#
+# 1s, not the VM's 3s. A run you are sitting and watching is the one place the
+# experiment's stated premise — a judgement every second — is worth paying for:
+# $7.00/day against $2.33, for as long as the window is open.
 watch:
-	go run ./cmd/bot -pair xrp_jpy -mode shadow -model jev-1.13.0 -tick 3s \
+	go run ./cmd/bot -pair xrp_jpy -mode shadow -model jev-1.13.0 -tick 1s \
 		-log-dir ./data -serve 127.0.0.1:8080
 
-# Just the dashboard, against whatever is already in ./data.
+# Just the dashboard, against whatever is already in ./data. -tick must match
+# the cadence the log was collected at; the page says so if it does not.
 serve:
-	go run ./cmd/serve -dir ./data -tick 3s
+	go run ./cmd/serve -dir ./data -tick 1s
 
 # A self-contained HTML page from a tick log. Add -in a filled log for the
 # reliability curve.
 report:
-	go run ./cmd/report -in data/ticks-$(shell date -u +%Y-%m-%d).jsonl -tick 3s
+	go run ./cmd/report -in data/ticks-$(shell date -u +%Y-%m-%d).jsonl -tick 1s
 
 # One real API call, checked end to end. Run before any long collection.
 preflight:

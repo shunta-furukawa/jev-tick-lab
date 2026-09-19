@@ -38,6 +38,12 @@ type section struct {
 	SVG         template.HTML
 	Table       [][]string
 	Head        []string
+
+	// Summary names the disclosure; Open shows it expanded. Both exist for the
+	// tape, which is the one table on the page worth reading directly rather
+	// than keeping behind a click.
+	Summary string
+	Open    bool
 }
 
 type pageView struct {
@@ -46,7 +52,7 @@ type pageView struct {
 	Meta     [][2]string
 	Tiles    []tile
 	Sections []section
-	Warning  string
+	Warnings []string
 	Live     bool
 	LiveNote string
 }
@@ -65,7 +71,7 @@ func (r Report) view() pageView {
 		}
 	}
 	if r.Records == 0 {
-		v.Warning = "No records. Has the collector written anything yet?"
+		v.Warnings = []string{"No records. Has the collector written anything yet?"}
 		return v
 	}
 
@@ -77,7 +83,10 @@ func (r Report) view() pageView {
 		{"generated", r.Generated.Format("2006-01-02 15:04 UTC")},
 	}
 
-	density := status("good", r.Density >= 0.95)
+	// Not just "at least 95%": over 100% means the cadence this page was given
+	// is not the one in the data, and a green dot beside 297% is a page
+	// arguing with itself.
+	density := status("good", r.Density >= 0.95 && r.Density <= 1.05)
 	fails := status("good", r.FailRate <= 0.02)
 	v.Tiles = []tile{
 		{"records", human(r.Records), fmt.Sprintf("over %s", round(r.To.Sub(r.From))), ""},
@@ -88,15 +97,30 @@ func (r Report) view() pageView {
 		{"input tokens", human(r.InputTokens), fmt.Sprintf("%.0f per call", perCall(r)), ""},
 	}
 
+	// The cadence is an input, not a measurement, and every "expected" count on
+	// this page hangs off it. Say so when the data disagrees, rather than
+	// reporting a healthy run as a broken one.
+	if o, want := r.ObservedTick, r.Options.TickInterval; o > 0 && want > 0 {
+		if ratio := o.Seconds() / want.Seconds(); ratio < 0.75 || ratio > 1.33 {
+			v.Warnings = append(v.Warnings, fmt.Sprintf(
+				"This page was told the cadence is %s, but the records are %s apart. "+
+					"Every expected-count and density figure below is wrong until -tick says %s.",
+				want, o, o))
+		}
+	}
 	if len(r.Runs) > 1 {
-		v.Warning = fmt.Sprintf("This window spans %d runs — the collector restarted. "+
-			"Check build_revision in runs-*.jsonl before comparing across the restart.", len(r.Runs))
+		v.Warnings = append(v.Warnings, fmt.Sprintf("This window spans %d runs — the collector restarted. "+
+			"Check build_revision in runs-*.jsonl before comparing across the restart.", len(r.Runs)))
 	}
 	if len(r.Models) > 1 {
-		v.Warning = fmt.Sprintf("This window spans %d model versions (%s). Records either side are not comparable.",
-			len(r.Models), strings.Join(r.Models, ", "))
+		v.Warnings = append(v.Warnings, fmt.Sprintf(
+			"This window spans %d model versions (%s). Records either side are not comparable.",
+			len(r.Models), strings.Join(r.Models, ", ")))
 	}
 
+	if len(r.Recent) > 0 {
+		v.Sections = append(v.Sections, r.priceSection())
+	}
 	v.Sections = append(v.Sections, r.timelineSection(), r.gateSection())
 	for _, d := range r.Dists {
 		v.Sections = append(v.Sections, d.section())
@@ -123,6 +147,136 @@ func status(good string, ok bool) string {
 }
 
 // --- sections ---------------------------------------------------------------
+
+// priceSection is the one part of the page that shows the run happening rather
+// than summarising it: the price, tick by tick, with what the model called on
+// each one.
+//
+// It does not show trades, because in shadow mode there are none. Saying
+// "0 trades" would be true and useless; what the run actually produces is a
+// call per tick and a gate verdict per call, so that is what is drawn.
+func (r Report) priceSection() section {
+	wanted, failed := 0, 0
+	for _, t := range r.Recent {
+		if t.Wanted {
+			wanted++
+		}
+		if t.Error != "" {
+			failed++
+		}
+	}
+
+	// The chart draws the data, so it quotes the cadence measured from the
+	// data — not the one the caller passed in, which may be wrong.
+	cadence := r.ObservedTick
+	if cadence <= 0 {
+		cadence = r.Options.TickInterval
+	}
+	note := fmt.Sprintf("The last %d ticks, one dot each, placed at the time it happened — "+
+		"so the spacing is the %s cadence and a hole is a tick that never ran.",
+		len(r.Recent), cadence)
+	if first, last := firstLastPrice(r.Recent); first > 0 && last > 0 {
+		note += fmt.Sprintf(" Price %s → %s (%+.1f bps over the window).",
+			priceStr(first, r.PriceMax-r.PriceMin), priceStr(last, r.PriceMax-r.PriceMin),
+			(last-first)/first*10000)
+	}
+	switch wanted {
+	case 0:
+		note += " The model asked to wait on every one of them, so nothing here would have been a trade."
+	default:
+		note += fmt.Sprintf(" On %d of them the model asked to enter or exit — ringed, with a rule "+
+			"through the plot. Shadow mode fills none of it; the gate column says what would have "+
+			"stopped each one.", wanted)
+	}
+	if failed > 0 {
+		note += fmt.Sprintf(" %d call(s) in this window failed and have no answer.", failed)
+	}
+
+	s := section{
+		Title:   "The run, tick by tick",
+		Note:    note,
+		SVG:     svgPrice(r.Recent, r.PriceMin, r.PriceMax),
+		Summary: "Tape — newest first",
+		Open:    true,
+		Head:    []string{"time (UTC)", "price", "Δ bps", "called", "p", "conf", "gate"},
+	}
+
+	span := r.PriceMax - r.PriceMin
+	tape, base := r.Recent, 0
+	if len(tape) > tapeRows {
+		base = len(tape) - tapeRows
+		tape = tape[base:]
+	}
+	for i := len(tape) - 1; i >= 0; i-- { // newest first, the way a tape reads
+		t := tape[i]
+		called, prob, conf := t.Action, "—", "—"
+		if t.Error != "" {
+			called = "call failed"
+		} else if called == "" {
+			called = "—"
+		}
+		if t.Prob > 0 {
+			prob = fmt.Sprintf("%.2f", t.Prob)
+		}
+		if t.Conf > 0 {
+			conf = fmt.Sprintf("%.2f", t.Conf)
+		}
+		// The first tick in the window has nothing to be a delta against, which
+		// is not the same as not having moved.
+		delta := "—"
+		if t.Price > 0 && base+i > 0 {
+			delta = bpsStr(t.DeltaBps)
+		}
+		s.Table = append(s.Table, []string{
+			t.At.Format("15:04:05"), priceStr(t.Price, span), delta, called, prob, conf, t.Gate,
+		})
+	}
+	return s
+}
+
+func firstLastPrice(ticks []Tick) (first, last float64) {
+	for _, t := range ticks {
+		if t.Price <= 0 {
+			continue
+		}
+		if first == 0 {
+			first = t.Price
+		}
+		last = t.Price
+	}
+	return first, last
+}
+
+// bpsStr signs a move, but never signs a move too small to have a direction at
+// the precision shown: "%+.1f" renders a two-hundredth of a basis point as
+// "-0.0", which reads as a fall that did not happen.
+func bpsStr(v float64) string {
+	if math.Abs(v) < 0.05 {
+		return "0.0"
+	}
+	return fmt.Sprintf("%+.1f", v)
+}
+
+// priceStr picks its decimals from the range on screen rather than the pair, so
+// xrp_jpy at 300.123 and btc_jpy at 15,400,000 both read correctly without the
+// renderer knowing which is which.
+func priceStr(v, span float64) string {
+	if v <= 0 {
+		return "—"
+	}
+	d := 0
+	switch {
+	case span < 0.01:
+		d = 4
+	case span < 1:
+		d = 3
+	case span < 10:
+		d = 2
+	case span < 1000:
+		d = 1
+	}
+	return fmt.Sprintf("%.*f", d, v)
+}
 
 func (r Report) timelineSection() section {
 	s := section{
@@ -428,6 +582,115 @@ func svgReliability(c calib.Report) template.HTML {
 		left+plot/2, h-6)
 	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="middle" transform="rotate(-90 %.1f %.1f)">realised</text>`,
 		left-46, top+plot/2, left-46, top+plot/2)
+	b.WriteString(`</svg>`)
+	return template.HTML(b.String())
+}
+
+// tapeRows is how much of the tail the tape prints. The chart covers the whole
+// recent window; the table is for reading, and a hundred open rows is not.
+const tapeRows = 30
+
+// svgPrice draws the tail of the log as a price line with one dot per
+// evaluation, each placed at the time it actually happened.
+//
+// Placing by time rather than by index is the whole point of the chart: at an
+// even cadence the dots are evenly spaced, so the cadence is legible by
+// construction and a skipped tick shows up as a gap in the rhythm instead of
+// being quietly closed up.
+//
+// Ticks where the model asked for an entry or an exit are marked with a rule
+// and a ring. Both are shape, never hue: this page's two status colours are
+// four Delta E apart under deuteranopia and may not carry meaning alone.
+func svgPrice(ticks []Tick, lo, hi float64) template.HTML {
+	if len(ticks) == 0 || hi <= 0 {
+		return ""
+	}
+	h := 220.0
+	b := svgOpen(chartW, h)
+
+	plotW := chartW - padL - padR
+	plotH := h - padT - padB
+
+	// A flat window would otherwise divide by zero and draw a line on the axis.
+	// Give it a visible band instead, so "nothing moved" looks like nothing
+	// moved rather than like missing data.
+	span := hi - lo
+	if span <= 0 {
+		span = math.Max(hi*0.0001, 0.0001)
+		lo, hi = hi-span/2, hi+span/2
+	}
+	pad := span * 0.15
+	lo, hi = lo-pad, hi+pad
+	span = hi - lo
+
+	y := func(p float64) float64 { return padT + plotH*(hi-p)/span }
+
+	t0, tn := ticks[0].At, ticks[len(ticks)-1].At
+	width := tn.Sub(t0).Seconds()
+	x := func(i int) float64 {
+		if width <= 0 {
+			if len(ticks) == 1 {
+				return padL + plotW/2
+			}
+			return padL + plotW*float64(i)/float64(len(ticks)-1)
+		}
+		return padL + plotW*ticks[i].At.Sub(t0).Seconds()/width
+	}
+
+	// Gridlines with the price they stand for, top to bottom.
+	for i := 0; i <= 4; i++ {
+		gy := padT + plotH*float64(i)/4
+		fmt.Fprintf(b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid"/>`, padL, gy, chartW-padR, gy)
+		fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="end">%s</text>`,
+			padL-8, gy+4, priceStr(hi-span*float64(i)/4, span))
+	}
+
+	// The call rules go down first so the price line reads over them.
+	for i, t := range ticks {
+		if !t.Wanted {
+			continue
+		}
+		fmt.Fprintf(b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="callrule"/>`,
+			x(i), padT, x(i), padT+plotH)
+	}
+
+	var pts []string
+	for i, t := range ticks {
+		if t.Price <= 0 {
+			continue
+		}
+		pts = append(pts, fmt.Sprintf("%.1f,%.1f", x(i), y(t.Price)))
+	}
+	if len(pts) > 1 {
+		fmt.Fprintf(b, `<polyline points="%s" class="line"/>`, strings.Join(pts, " "))
+	}
+
+	for i, t := range ticks {
+		if t.Price <= 0 {
+			continue
+		}
+		tip := fmt.Sprintf("%s · %s · %s bps", t.At.Format("15:04:05"), priceStr(t.Price, span), bpsStr(t.DeltaBps))
+		if t.Error != "" {
+			tip += " · call failed"
+		} else if t.Action != "" {
+			tip += fmt.Sprintf(" · %s p=%.2f · %s", t.Action, t.Prob, t.Gate)
+		}
+		fmt.Fprintf(b, `<circle cx="%.1f" cy="%.1f" r="2.4" class="tickdot" tabindex="0" data-tip="%s">`+
+			`<title>%s</title></circle>`,
+			x(i), y(t.Price), template.HTMLEscapeString(tip), template.HTMLEscapeString(tip))
+		if t.Wanted {
+			fmt.Fprintf(b, `<circle cx="%.1f" cy="%.1f" r="5.5" class="callring"/>`, x(i), y(t.Price))
+		}
+	}
+
+	fmt.Fprintf(b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="baseline"/>`,
+		padL, padT+plotH, chartW-padR, padT+plotH)
+	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis">%s</text>`,
+		padL, h-10, template.HTMLEscapeString(t0.Format("15:04:05")))
+	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="middle">%d ticks</text>`,
+		padL+plotW/2, h-10, len(ticks))
+	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="end">%s</text>`,
+		chartW-padR, h-10, template.HTMLEscapeString(tn.Format("15:04:05")))
 	b.WriteString(`</svg>`)
 	return template.HTML(b.String())
 }
