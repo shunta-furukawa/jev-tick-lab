@@ -29,217 +29,254 @@ func (r Report) HTML() (string, error) {
 	return buf.String(), nil
 }
 
-type tile struct {
-	Label, Value, Note, Status string
+// kpi is one stat tile. Hero marks the single number the page leads with.
+type kpi struct {
+	Label, Value, Note, Status, Tip string
+	Hero                            bool
 }
 
-type section struct {
+// panel is the left-hand region: the chart, and under it the tape. The tape
+// lives here rather than in a tab because on a maximised browser the chart
+// leaves a screenful of space below it, and the raw sequence is the thing a
+// person watching a run actually wants next to the picture of it.
+type panel struct {
 	Title, Note string
 	SVG         template.HTML
-	Table       [][]string
-	Head        []string
+	Extra       template.HTML
+	BelowTitle  string
+	Below       template.HTML
+}
 
-	// Summary names the disclosure; Open shows it expanded. Both exist for the
-	// tape, which is the one table on the page worth reading directly rather
-	// than keeping behind a click.
-	Summary string
-	Open    bool
+// tab is one of the right-hand panels. Everything the old page put below the
+// fold lives in one of these, so a maximised browser needs no scrolling.
+type tab struct {
+	Name string
+	Note string
+	HTML template.HTML
 }
 
 type pageView struct {
-	Title    string
-	Subtitle string
-	Meta     [][2]string
-	Tiles    []tile
-	Sections []section
-	Warnings []string
-	Live     bool
-	LiveNote string
+	Title, Subtitle      string
+	ModeLabel, ModeClass string
+	Meta                 [][2]string
+	Warnings             []string
+	KPIs                 []kpi
+	Chart                panel
+	Tabs                 []tab
+	Live                 bool
 }
 
 func (r Report) view() pageView {
+	mode := r.Mode()
+	m := lookup(modeJA, mode)
 	v := pageView{
-		Title:    "jev-tick-lab",
-		Subtitle: r.Pair,
-		Live:     r.Live,
-	}
-	if r.Live {
-		age := time.Since(r.To)
-		v.LiveNote = fmt.Sprintf("newest record %s ago", round(age))
-		if age > 2*time.Minute {
-			v.LiveNote += " — the collector may have stopped"
-		}
+		Title:     "jev-tick-lab",
+		Subtitle:  r.Pair,
+		ModeLabel: m.Label,
+		ModeClass: mode,
+		Live:      r.Live,
 	}
 	if r.Records == 0 {
-		v.Warnings = []string{"No records. Has the collector written anything yet?"}
+		v.Warnings = []string{"まだ記録がありません。収集プロセスは動いていますか？"}
+		v.Chart = panel{Title: "まだ何もありません", Note: "最初の記録が書かれると、ここに値動きが出ます。"}
 		return v
 	}
 
 	v.Meta = [][2]string{
-		{"window", fmt.Sprintf("%s → %s UTC", r.From.Format("2006-01-02 15:04"), r.To.Format("15:04"))},
-		{"model", strings.Join(r.Models, ", ")},
-		{"cadence", r.Options.TickInterval.String()},
-		{"runs", fmt.Sprint(len(r.Runs))},
-		{"generated", r.Generated.Format("2006-01-02 15:04 UTC")},
+		{"期間", fmt.Sprintf("%s → %s UTC", r.From.Format("01/02 15:04"), r.To.Format("15:04"))},
+		{"モデル", strings.Join(r.Models, ", ")},
+		{"評価間隔", jaDuration(r.Options.TickInterval)},
+	}
+	if r.Live {
+		age := time.Since(r.To)
+		label := round(age) + "前"
+		if age > 2*time.Minute {
+			label += "（収集が止まっているかもしれません）"
+		}
+		v.Meta = append(v.Meta, [2]string{"最終記録", label})
 	}
 
-	// Not just "at least 95%": over 100% means the cadence this page was given
-	// is not the one in the data, and a green dot beside 297% is a page
-	// arguing with itself.
-	density := status("good", r.Density >= 0.95 && r.Density <= 1.05)
-	fails := status("good", r.FailRate <= 0.02)
-	v.Tiles = []tile{
-		{"records", human(r.Records), fmt.Sprintf("over %s", round(r.To.Sub(r.From))), ""},
-		{"tick density", pct(r.Density), "of the ticks the span should hold", density},
-		{"failed calls", fmt.Sprintf("%.2f%%", r.FailRate*100), fmt.Sprintf("%d of %d", r.Failed, r.Records), fails},
-		{"latency p50", fmt.Sprintf("%.0f ms", r.Latency50), fmt.Sprintf("p99 %.0f ms", r.Latency99), ""},
-		{"cost so far", fmt.Sprintf("$%.2f", r.CostUSD), fmt.Sprintf("$%.2f/day at this cadence", r.CostPerDay), ""},
-		{"input tokens", human(r.InputTokens), fmt.Sprintf("%.0f per call", perCall(r)), ""},
-	}
+	v.Warnings = r.warnings()
+	v.KPIs = r.kpis()
+	v.Chart = r.chartPanel()
+	v.Tabs = r.tabs()
+	return v
+}
 
+// Mode reports what kind of run this log came from. It is the first thing the
+// page has to say, because it is the difference between money and a rehearsal.
+func (r Report) Mode() string {
 	if r.IsLive() {
-		v.Warnings = append(v.Warnings,
-			"This run places real orders on bitbank. The figures below are money, not a simulation.")
+		return "live"
 	}
+	if len(r.Paper) > 0 {
+		return "paper"
+	}
+	if r.RunMode != "" {
+		return r.RunMode
+	}
+	return "shadow"
+}
 
+func (r Report) warnings() []string {
+	var out []string
+	if r.IsLive() {
+		out = append(out, "本物の注文が出ています。下の金額は実際のお金です。")
+	}
 	// The cadence is an input, not a measurement, and every "expected" count on
 	// this page hangs off it. Say so when the data disagrees, rather than
 	// reporting a healthy run as a broken one.
 	if o, want := r.ObservedTick, r.Options.TickInterval; o > 0 && want > 0 {
 		if ratio := o.Seconds() / want.Seconds(); ratio < 0.75 || ratio > 1.33 {
-			v.Warnings = append(v.Warnings, fmt.Sprintf(
-				"This page was told the cadence is %s, but the records are %s apart. "+
-					"Every expected-count and density figure below is wrong until -tick says %s.",
-				want, o, o))
+			out = append(out, fmt.Sprintf(
+				"評価間隔は%sと指定されていますが、記録は実際には%sおきです。"+
+					"-tick を%sにするまで、取得率や想定件数の数字はすべて誤りです。",
+				jaDuration(want), jaDuration(o), jaDuration(o)))
 		}
 	}
-	// In paper mode the P&L is the thing you opened the page for, so it goes
-	// in front of the collection statistics rather than below them.
-	if len(r.Paper) > 0 {
-		v.Tiles = append(paperTiles(r), v.Tiles...)
-	}
-
 	if len(r.Runs) > 1 {
-		v.Warnings = append(v.Warnings, fmt.Sprintf("This window spans %d runs — the collector restarted. "+
-			"Check build_revision in runs-*.jsonl before comparing across the restart.", len(r.Runs)))
+		out = append(out, fmt.Sprintf(
+			"この期間に収集プロセスが%d回起動しています（途中で再起動した）。"+
+				"再起動をまたいで比較する前に runs-*.jsonl の build_revision を確認してください。", len(r.Runs)))
 	}
 	if len(r.Models) > 1 {
-		v.Warnings = append(v.Warnings, fmt.Sprintf(
-			"This window spans %d model versions (%s). Records either side are not comparable.",
+		out = append(out, fmt.Sprintf(
+			"この期間に%d種類のモデルバージョンが混ざっています（%s）。前後の記録は比較できません。",
 			len(r.Models), strings.Join(r.Models, ", ")))
 	}
-
-	if len(r.Recent) > 0 {
-		v.Sections = append(v.Sections, r.priceSection())
-	}
-	if len(r.Paper) > 0 {
-		v.Sections = append(v.Sections, r.paperSection())
-	}
-	v.Sections = append(v.Sections, r.timelineSection(), r.gateSection())
-	for _, d := range r.Dists {
-		v.Sections = append(v.Sections, d.section())
-	}
-	if r.HasOutcomes {
-		v.Sections = append(v.Sections, r.calibrationSection())
-	}
-	return v
+	return out
 }
 
-// paperTiles are the numbers a paper run is actually about.
-func paperTiles(r Report) []tile {
-	var out []tile
-	for _, p := range r.Paper {
-		net := p.NetJPY + p.UnrealJPY
-		note := fmt.Sprintf("%d round trip(s), %d up", p.Trips, p.Wins)
-		if p.Working > 0 {
-			note += fmt.Sprintf(", %d working", p.Working)
-		}
-		out = append(out, tile{
-			// The unit goes in the label. A stat tile is 24px type in a 140px
-			// column, and "+1,234.56 JPY" wraps onto a second line there,
-			// which strands the status dot on a line of its own.
-			Label:  p.Style + " net (JPY)",
-			Value:  fmt.Sprintf("%+.2f", net),
-			Note:   note,
-			Status: status("good", net > 0),
-		})
+// kpis is the strip across the top: the few numbers worth reading first.
+func (r Report) kpis() []kpi {
+	var out []kpi
+
+	// Money leads, when there is money. Otherwise the run's own health does.
+	if len(r.Paper) > 0 {
+		out = append(out, r.moneyKPIs()...)
 	}
-	// The gap between the two is the entire point of running both, so it is
-	// its own tile rather than something to be worked out by subtraction.
-	if len(r.Paper) == 2 {
-		a, b := r.Paper[0], r.Paper[1]
-		out = append(out, tile{
-			Label: "fees paid (JPY)",
-			Value: fmt.Sprintf("%+.2f", a.FeesJPY+b.FeesJPY),
-			Note:  fmt.Sprintf("%s %s, %s %s", a.Style, jpy(a.FeesJPY), b.Style, jpy(b.FeesJPY)),
+
+	density := "good"
+	densityNote := "1秒ごとに記録できた割合"
+	if r.Density < 0.95 || r.Density > 1.05 {
+		density = "critical"
+		densityNote = "取りこぼしか、評価間隔の指定違いです"
+	}
+	fails := "good"
+	if r.FailRate > 0.02 {
+		fails = "critical"
+	}
+
+	out = append(out,
+		kpi{Label: "記録件数", Value: human(r.Records),
+			Note: round(r.To.Sub(r.From)) + "ぶん",
+			Tip:  "モデルに1回聞くごとに1件。失敗した呼び出しも記録されます"},
+		kpi{Label: "ティック取得率", Value: pct(r.Density), Note: densityNote, Status: density,
+			Tip: "この期間に本来あるべき件数に対して、実際に何件書けたか。100%が正常です"},
+		kpi{Label: "API失敗率", Value: fmt.Sprintf("%.2f%%", r.FailRate*100),
+			Note: fmt.Sprintf("%d件 / %d件", r.Failed, r.Records), Status: fails,
+			Tip: "モデルへの呼び出しが失敗した割合。失敗した回は判断ができていません"},
+	)
+	// Latency and API cost matter, but not before the money and the health do.
+	// They live with the rest of the collection numbers, in that tab.
+	if len(r.Paper) == 0 {
+		out = append(out,
+			kpi{Label: "応答時間", Value: fmt.Sprintf("%.0f ms", r.Latency50),
+				Note: fmt.Sprintf("遅い方から1%%が %.0f ms", r.Latency99),
+				Tip:  "モデルが答えるまでの時間。2秒を超えた回答は古すぎるとして捨てられます"},
+			kpi{Label: "APIコスト", Value: fmt.Sprintf("$%.2f", r.CostUSD),
+				Note: fmt.Sprintf("この間隔なら1日 $%.2f", r.CostPerDay),
+				Tip:  "TypeSafe への支払い。取引の損益とは別物です"})
+	}
+	return out
+}
+
+// moneyKPIs are the execution numbers, and they go first.
+func (r Report) moneyKPIs() []kpi {
+	var out []kpi
+	live := r.IsLive()
+
+	var net, fees float64
+	var trips, wins, working int
+	var pos string
+	var brake, brakeWhy string
+	for _, p := range r.Paper {
+		net += p.NetJPY + p.UnrealJPY
+		fees += p.FeesJPY
+		trips += p.Trips
+		wins += p.Wins
+		working += p.Working
+		if p.Size > 0 && pos == "" {
+			pos = fmt.Sprintf("買い %.4f @ %.3f", p.Size, p.EntryPx)
+		}
+		if live {
+			brake, brakeWhy = verdictLabelJA(p.Intent), p.Gate
+		}
+	}
+	if pos == "" {
+		pos = "なし"
+	}
+
+	status := "good"
+	if net < 0 {
+		status = "critical"
+	}
+	label := "模擬損益（円）"
+	note := fmt.Sprintf("%d回の売買、うち%d回プラス", trips, wins)
+	if live {
+		label = "損益（円）"
+		note = fmt.Sprintf("%d回の売買、うち%d回プラス。手数料込み", trips, wins)
+	}
+	out = append(out, kpi{
+		Label: label, Value: fmt.Sprintf("%+.2f", net), Note: note,
+		Status: status, Hero: true,
+		Tip: "確定した損益と含み損益の合計、手数料を引いたあとの値です",
+	})
+
+	posNote := "建玉なし"
+	if working > 0 {
+		posNote = fmt.Sprintf("注文が%d件出ています", working)
+	} else if pos != "なし" {
+		posNote = "持っている状態です"
+	}
+	out = append(out, kpi{
+		Label: "いまの建玉", Value: pos, Note: posNote,
+		Tip: "今この瞬間、いくら持っているか。「なし」なら何も持っていません",
+	})
+
+	out = append(out, kpi{
+		Label: "支払った手数料（円）", Value: fmt.Sprintf("%+.2f", fees),
+		Note: "売買1往復ごとに必ず出ていく分",
+		Tip:  "成行は往復で約24bps（3000円なら約7.2円）。指値はリベートなのでマイナスになります",
+	})
+
+	if live {
+		st := "good"
+		if brake != "取引可" {
+			st = "warning"
+		}
+		if brake == "全停止" {
+			st = "critical"
+		}
+		if brakeWhy == "" {
+			brakeWhy = "上限には触れていません"
+		}
+		out = append(out, kpi{
+			Label: "ブレーキ", Value: brake, Note: brakeWhy, Status: st,
+			Tip: "安全装置の判定。「決済のみ」なら新規は止めていますが、持っているものは出せます",
 		})
 	}
 	return out
 }
 
-// paperSection lays the paths side by side. Gross before fees against net
-// after them is the comparison the whole phase exists to make: an all-taker
-// round trip on a JPY alt is 24bps, which is larger than most of the moves
-// this experiment is trying to predict.
-//
-// The same section serves live mode, with one path instead of two and a title
-// that does not pretend the money is imaginary.
-func (r Report) paperSection() section {
-	title := "Paper execution — maker against taker"
-	note := "The same answers, executed two ways. Taker crosses the spread and always fills; " +
-		"maker rests at the touch, earns the rebate, and often does not fill at all. " +
-		"Gross is before fees, net is after — the difference is the cost of getting in and out."
-
-	if r.IsLive() {
-		title = "Live execution — real orders, real money"
-		note = "These are filled orders on bitbank, not a simulation. " +
-			"Gross is before fees, net is after. " +
-			"The brake column is the risk layer's verdict: trade means entries are allowed, " +
-			"exit_only means it will close but not open, halt means it places nothing."
+func jaDuration(d time.Duration) string {
+	switch {
+	case d >= time.Minute:
+		return fmt.Sprintf("%.0f分", d.Minutes())
+	case d >= time.Second:
+		return fmt.Sprintf("%.0f秒", d.Seconds())
 	}
-
-	for _, p := range r.Paper {
-		if p.Working > 0 || p.Size > 0 {
-			continue
-		}
-		if p.Trips == 0 {
-			note += fmt.Sprintf(" The %s path has not completed a round trip yet.", p.Style)
-		}
-	}
-
-	head := []string{"path", "position", "round trips", "up", "gross", "fees", "net", "unrealised"}
-	if r.IsLive() {
-		head = []string{"path", "brake", "why", "position", "round trips", "up", "gross", "fees", "net"}
-	}
-	s := section{
-		Title:   title,
-		Note:    note,
-		Summary: "Per path",
-		Open:    true,
-		Head:    head,
-	}
-	for _, p := range r.Paper {
-		pos := "flat"
-		if p.Size > 0 {
-			pos = fmt.Sprintf("%s %.4f @ %.3f", p.Side, p.Size, p.EntryPx)
-		}
-		if p.Working > 0 {
-			pos += fmt.Sprintf(" (+%d working)", p.Working)
-		}
-		if r.IsLive() {
-			s.Table = append(s.Table, []string{
-				p.Style, p.Intent, p.Gate, pos, fmt.Sprint(p.Trips), fmt.Sprint(p.Wins),
-				jpy(p.GrossJPY), jpy(p.FeesJPY), jpy(p.NetJPY),
-			})
-			continue
-		}
-		s.Table = append(s.Table, []string{
-			p.Style, pos, fmt.Sprint(p.Trips), fmt.Sprint(p.Wins),
-			jpy(p.GrossJPY), jpy(p.FeesJPY), jpy(p.NetJPY), jpy(p.UnrealJPY),
-		})
-	}
-	s.SVG = svgPaths(r.Paper)
-	return s
+	return d.String()
 }
 
 func perCall(r Report) float64 {
@@ -250,117 +287,303 @@ func perCall(r Report) float64 {
 	return float64(r.InputTokens) / float64(answered)
 }
 
-func status(good string, ok bool) string {
-	if ok {
-		return good
-	}
-	return "critical"
-}
-
-// --- sections ---------------------------------------------------------------
-
-// priceSection is the one part of the page that shows the run happening rather
-// than summarising it: the price, tick by tick, with what the model called on
-// each one.
-//
-// It does not show trades, because in shadow mode there are none. Saying
-// "0 trades" would be true and useless; what the run actually produces is a
-// call per tick and a gate verdict per call, so that is what is drawn.
-func (r Report) priceSection() section {
-	wanted, failed := 0, 0
-	for _, t := range r.Recent {
-		if t.Wanted {
-			wanted++
-		}
-		if t.Error != "" {
-			failed++
-		}
-	}
-
-	// The chart draws the data, so it quotes the cadence measured from the
-	// data — not the one the caller passed in, which may be wrong.
+func (r Report) chartPanel() panel {
 	cadence := r.ObservedTick
 	if cadence <= 0 {
 		cadence = r.Options.TickInterval
 	}
-	note := fmt.Sprintf("The last %d ticks, one dot each, placed at the time it happened — "+
-		"so the spacing is the %s cadence and a hole is a tick that never ran.",
-		len(r.Recent), cadence)
-	if first, last := firstLastPrice(r.Recent); first > 0 && last > 0 {
-		note += fmt.Sprintf(" Price %s → %s (%+.1f bps over the window).",
-			priceStr(first, r.PriceMax-r.PriceMin), priceStr(last, r.PriceMax-r.PriceMin),
-			(last-first)/first*10000)
-	}
-	paper := len(r.Paper) > 0
-	switch {
-	case wanted == 0:
-		note += " The model asked to wait on every one of them, so nothing here would have been a trade."
-	case paper:
-		note += fmt.Sprintf(" On %d of them the model asked to enter or exit — ringed, with a rule "+
-			"through the plot. What each one actually did is in the paper section below.", wanted)
-	default:
-		note += fmt.Sprintf(" On %d of them the model asked to enter or exit — ringed, with a rule "+
-			"through the plot. Shadow mode fills none of it; the gate column says what would have "+
-			"stopped each one.", wanted)
-	}
-	filled, held := 0, 0
+
+	wanted, filled, held, failed := 0, 0, 0, 0
 	for _, t := range r.Recent {
+		if t.Wanted {
+			wanted++
+		}
 		if t.Filled {
 			filled++
 		}
 		if t.Held {
 			held++
 		}
+		if t.Error != "" {
+			failed++
+		}
+	}
+
+	note := fmt.Sprintf("直近%d回ぶんの値動きです。点ひとつが1回の評価で、実際の時刻の位置に置いてあるので、"+
+		"点の間隔がそのまま%sの評価間隔になります。間隔が空いていれば、そこは評価できなかった回です。",
+		len(r.Recent), jaDuration(cadence))
+	if first, last := firstLastPrice(r.Recent); first > 0 && last > 0 {
+		note += fmt.Sprintf(" 価格は %s → %s（%s）。",
+			priceStr(first, r.PriceMax-r.PriceMin), priceStr(last, r.PriceMax-r.PriceMin),
+			bpsStr((last-first)/first*10000)+" bps")
+	}
+	switch {
+	case wanted == 0:
+		note += " この間、モデルは一度も売買を求めていません（ずっと「待ち」）。"
+	case len(r.Paper) > 0:
+		note += fmt.Sprintf(" うち%d回はモデルが売買を求めました（○印）。実際にどうなったかは右の「いまの状況」に出ています。", wanted)
+	default:
+		note += fmt.Sprintf(" うち%d回はモデルが売買を求めました（○印）。"+
+			"ただし影運転なので注文は一切出していません。止めた理由は右の一覧にあります。", wanted)
 	}
 	if filled > 0 || held > 0 {
-		note += fmt.Sprintf(" %d execution(s) here, marked with a diamond; the band along the "+
-			"foot is the %d tick(s) a position was open.", filled, held)
+		note += fmt.Sprintf(" ◆が実際に約定した回（%d回）、下の帯が建玉を持っていた区間（%d回ぶん）です。", filled, held)
 	}
 	if failed > 0 {
-		note += fmt.Sprintf(" %d call(s) in this window failed and have no answer.", failed)
+		note += fmt.Sprintf(" %d回は呼び出しに失敗していて、判断がありません。", failed)
 	}
 
-	s := section{
-		Title:   "The run, tick by tick",
-		Note:    note,
-		SVG:     svgPrice(r.Recent, r.PriceMin, r.PriceMax),
-		Summary: "Tape — newest first",
-		Open:    true,
-		Head:    []string{"time (UTC)", "price", "Δ bps", "called", "p", "conf", "gate"},
+	tape := r.tapeTab()
+	return panel{
+		Title:      "値動きと売買（1回ごと）",
+		Note:       note,
+		SVG:        svgPrice(r.Recent, r.PriceMin, r.PriceMax),
+		Extra:      chartLegend(wanted > 0, filled > 0 || held > 0),
+		BelowTitle: tape.Name + " — " + tape.Note,
+		Below:      tape.HTML,
+	}
+}
+
+// chartLegend names the marks in words. Shape carries the meaning, so the
+// legend shows the shape rather than a colour swatch.
+func chartLegend(calls, fills bool) template.HTML {
+	var b strings.Builder
+	b.WriteString(`<div class="legend">`)
+	b.WriteString(`<span><svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="2.4" class="tickdot"/></svg>1回の評価</span>`)
+	if calls {
+		b.WriteString(`<span><svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5" class="callring"/></svg>モデルが売買を求めた</span>`)
+	}
+	if fills {
+		b.WriteString(`<span><svg width="14" height="14" viewBox="0 0 14 14"><path d="M 7 2 l 4.5 5 l -4.5 5 l -4.5 -5 Z" class="fillmark"/></svg>約定した</span>`)
+		b.WriteString(`<span><svg width="18" height="14" viewBox="0 0 18 14"><rect x="1" y="5" width="16" height="5" class="heldband"/></svg>建玉を持っていた区間</span>`)
+	}
+	b.WriteString(`</div>`)
+	return template.HTML(b.String())
+}
+
+// tabs are the right-hand panels. "Now" first: it answers the question
+// somebody opening this page actually has.
+func (r Report) tabs() []tab {
+	var out []tab
+	// The first tab is whichever one answers the question a person opening
+	// this page actually has. With execution that is "what did it do"; without
+	// it there is nothing to show but what stopped every tick, so that leads.
+	if len(r.Paper) > 0 {
+		out = append(out, r.nowTab())
+	}
+	out = append(out, r.whyTab(), r.answersTab(), r.healthTab())
+	if r.HasOutcomes {
+		out = append(out, r.calibrationTab())
+	}
+	return out
+}
+
+// nowTab is the execution standing. It is only built when there is execution
+// to report; see tabs.
+func (r Report) nowTab() tab {
+	var b strings.Builder
+	note := "同じ判断を2通りの出し方で約定させた結果です。手数料を引く前と後を並べてあります。"
+	if r.IsLive() {
+		note = "bitbank に実際に出した注文の結果です。手数料を引く前と後を並べてあります。"
 	}
 
+	b.WriteString(`<div class="rows">`)
+	for _, p := range r.Paper {
+		st := lookup(styleJA, p.Style)
+		pos := "建玉なし"
+		if p.Size > 0 {
+			pos = fmt.Sprintf("買い %.4f @ %.3f", p.Size, p.EntryPx)
+		}
+		if p.Working > 0 {
+			pos += fmt.Sprintf("（注文%d件）", p.Working)
+		}
+		fmt.Fprintf(&b, `<div style="margin-bottom:10px"><div class="nm">%s<small>%s</small></div>`,
+			template.HTMLEscapeString(st.Label), template.HTMLEscapeString(st.Why))
+		fmt.Fprintf(&b, `<table><tbody>`)
+		rows := [][2]string{
+			{"いまの建玉", pos},
+			{"売買した回数", fmt.Sprintf("%d回（うちプラス %d回）", p.Trips, p.Wins)},
+			{"手数料を引く前", jpy(p.GrossJPY)},
+			{"支払った手数料", jpy(p.FeesJPY)},
+			{"手数料を引いた後", jpy(p.NetJPY)},
+			{"含み損益", jpy(p.UnrealJPY)},
+		}
+		if r.IsLive() {
+			brake := verdictLabelJA(p.Intent)
+			if p.Gate != "" {
+				brake += "（" + p.Gate + "）"
+			}
+			rows = append([][2]string{{"ブレーキ", brake}}, rows...)
+		}
+		for _, kv := range rows {
+			fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td></tr>`,
+				template.HTMLEscapeString(kv[0]), template.HTMLEscapeString(kv[1]))
+		}
+		b.WriteString(`</tbody></table></div>`)
+	}
+	b.WriteString(`</div>`)
+	b.WriteString(string(svgPaths(r.Paper)))
+	return tab{Name: "いまの状況", Note: note, HTML: template.HTML(b.String())}
+}
+
+// whyTab is the most useful panel on the page: what stopped each evaluation
+// from becoming a trade, in words, ordered by how often it happened.
+func (r Report) whyTab() tab {
+	if len(r.Gates) == 0 {
+		return tab{Name: "止めた理由", HTML: `<p class="empty">まだ判断がありません。</p>`}
+	}
+	max := r.Gates[0].N
+	var b strings.Builder
+	b.WriteString(`<div class="rows">`)
+	for _, c := range r.Gates {
+		t := lookup(gateJA, c.Label)
+		w := 0.0
+		if max > 0 {
+			w = float64(c.N) / float64(max) * 100
+		}
+		fmt.Fprintf(&b, `<div class="row" tabindex="0" data-tip="%s ・ %d回（%s）">`+
+			`<div class="nm">%s<small>%s</small></div>`+
+			`<div class="track"><i style="width:%.1f%%"></i></div>`+
+			`<div class="qt">%d回 %s</div></div>`,
+			template.HTMLEscapeString(t.Why), c.N, pct(c.Share),
+			template.HTMLEscapeString(t.Label), template.HTMLEscapeString(t.Why),
+			w, c.N, pct(c.Share))
+	}
+	b.WriteString(`</div>`)
+	note := "1回の評価ごとに、必ずどれか1つが記録されます。「通過」以外は、何かが取引を止めたということです。"
+	if len(r.Paper) == 0 {
+		note += "この運転では注文を出していないので（影運転）、これはあくまで「もし取引していたら」の記録です。" +
+			"実際の約定まで見たい場合は make paper（模擬）か make live（実取引）で起動してください。"
+	}
+	return tab{Name: "止めた理由", Note: note, HTML: template.HTML(b.String())}
+}
+
+// tapeTab is the raw sequence, newest first.
+func (r Report) tapeTab() tab {
+	if len(r.Recent) == 0 {
+		return tab{Name: "直近の記録", HTML: `<p class="empty">まだ記録がありません。</p>`}
+	}
 	span := r.PriceMax - r.PriceMin
 	tape, base := r.Recent, 0
 	if len(tape) > tapeRows {
 		base = len(tape) - tapeRows
 		tape = tape[base:]
 	}
-	for i := len(tape) - 1; i >= 0; i-- { // newest first, the way a tape reads
+
+	var b strings.Builder
+	b.WriteString(`<table><thead><tr><th>時刻(UTC)</th><th>価格</th><th>前回比(bps)</th>` +
+		`<th>モデルの判断</th><th>確率</th><th>止めた理由</th></tr></thead><tbody>`)
+	for i := len(tape) - 1; i >= 0; i-- {
 		t := tape[i]
-		called, prob, conf := t.Action, "—", "—"
+		called := "—"
 		if t.Error != "" {
-			called = "call failed"
-		} else if called == "" {
-			called = "—"
+			called = "失敗"
+		} else if t.Action != "" {
+			called = lookup(actionJA, t.Action).Label
 		}
+		prob := "—"
 		if t.Prob > 0 {
 			prob = fmt.Sprintf("%.2f", t.Prob)
 		}
-		if t.Conf > 0 {
-			conf = fmt.Sprintf("%.2f", t.Conf)
-		}
-		// The first tick in the window has nothing to be a delta against, which
-		// is not the same as not having moved.
 		delta := "—"
 		if t.Price > 0 && base+i > 0 {
 			delta = bpsStr(t.DeltaBps)
 		}
-		s.Table = append(s.Table, []string{
-			t.At.Format("15:04:05"), priceStr(t.Price, span), delta, called, prob, conf, t.Gate,
-		})
+		cls := ""
+		if t.Filled {
+			cls = ` class="act"`
+		}
+		fmt.Fprintf(&b, `<tr%s><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+			cls, t.At.Format("15:04:05"), priceStr(t.Price, span), delta,
+			template.HTMLEscapeString(called), prob,
+			template.HTMLEscapeString(gateLabelJA(t.Gate)))
 	}
-	return s
+	b.WriteString(`</tbody></table>`)
+	return tab{
+		Name: "直近の記録",
+		Note: fmt.Sprintf("新しい順に%d件。太字の行は実際に約定した回です。", len(tape)),
+		HTML: template.HTML(b.String()),
+	}
 }
+
+// answersTab shows where each answer actually sits against the threshold that
+// reads it — the thing a bare histogram cannot say.
+func (r Report) answersTab() tab {
+	if len(r.Dists) == 0 {
+		return tab{Name: "モデルの回答", HTML: `<p class="empty">まだ回答がありません。</p>`}
+	}
+	var b strings.Builder
+	for _, d := range r.Dists {
+		t := lookup(questionJA, d.Question)
+		line := fmt.Sprintf("%d件、中央値%.2f。", d.N, d.Median)
+		if d.Gate > 0 {
+			side := "超えて"
+			if !d.GateAbove {
+				side = "下回って"
+			}
+			line += fmt.Sprintf("しきい値%.2fを%d件（%.0f%%）が%sいます。",
+				d.Gate, d.OverGate, float64(d.OverGate)/float64(d.N)*100, side)
+		}
+		fmt.Fprintf(&b, `<div style="margin-bottom:12px"><div class="nm">%s <small>%s</small></div>`+
+			`<p class="note" style="margin:2px 0 4px">%s</p>%s</div>`,
+			template.HTMLEscapeString(t.Label), template.HTMLEscapeString(d.Question),
+			template.HTMLEscapeString(t.Why+" "+line), svgHist(d))
+	}
+	return tab{
+		Name: "モデルの回答",
+		Note: "点線がしきい値です。回答がしきい値の向こう側に寄っているなら、そのゲートはほぼ常に効いています。",
+		HTML: template.HTML(b.String()),
+	}
+}
+
+// healthTab is whether the collection itself is usable.
+func (r Report) healthTab() tab {
+	var b strings.Builder
+	fmt.Fprintf(&b, `<p class="note">応答時間 中央値 %.0f ms（遅い方から1%%が %.0f ms）。`+
+		`APIコスト $%.2f、この間隔なら1日 $%.2f。`+
+		`入力トークン %s（1回あたり %.0f）。モデル %s。</p>`,
+		r.Latency50, r.Latency99, r.CostUSD, r.CostPerDay,
+		human(r.InputTokens), perCall(r), template.HTMLEscapeString(strings.Join(r.Models, ", ")))
+	b.WriteString(string(svgTimeline(r.Timeline)))
+	b.WriteString(`<table><thead><tr><th>開始</th><th>記録</th><th>想定</th><th>取得率</th><th>失敗</th></tr></thead><tbody>`)
+	for _, bk := range r.Timeline {
+		fmt.Fprintf(&b, `<tr><td>%s</td><td>%d</td><td>%d</td><td>%s</td><td>%d</td></tr>`,
+			bk.At.Format("01/02 15:04"), bk.Records, bk.Expected, pct(bk.Density), bk.Errors)
+	}
+	b.WriteString(`</tbody></table>`)
+	return tab{
+		Name: "収集の健康",
+		Note: "時間帯ごとに、本来あるべき件数のうち何件書けたか。へこみは取りこぼし、空白は収集が止まっていた時間です。",
+		HTML: template.HTML(b.String()),
+	}
+}
+
+// calibrationTab is the deliverable of the whole experiment.
+func (r Report) calibrationTab() tab {
+	c := r.Calibration
+	note := fmt.Sprintf("%d秒後の結果と照合。使えた記録%d件 / %d件。"+
+		"Brier %.4f、較正誤差 %.4f。対角線より上は「言ったより実際に起きた」、下は「言ったほど起きなかった」です。",
+		c.Options.HorizonSec, c.Usable, c.Total, c.Brier, c.ECE)
+
+	var b strings.Builder
+	b.WriteString(string(svgReliability(c)))
+	b.WriteString(`<table><thead><tr><th>予測確率</th><th>件数</th><th>モデルの言い値</th>` +
+		`<th>実際の頻度</th><th>ずれ</th></tr></thead><tbody>`)
+	for _, bin := range c.Bins {
+		if bin.N == 0 {
+			fmt.Fprintf(&b, `<tr><td>%.1f–%.1f</td><td>0</td><td>—</td><td>—</td><td>—</td></tr>`, bin.Lo, bin.Hi)
+			continue
+		}
+		fmt.Fprintf(&b, `<tr><td>%.1f–%.1f</td><td>%d</td><td>%.3f</td><td>%.3f</td><td>%+.3f</td></tr>`,
+			bin.Lo, bin.Hi, bin.N, bin.MeanPredicted, bin.Realised, bin.Gap())
+	}
+	b.WriteString(`</tbody></table>`)
+	return tab{Name: "較正", Note: note, HTML: template.HTML(b.String())}
+}
+
+// tapeRows is how much of the tail the tape prints. The chart covers the whole
+// recent window; the table is for reading, and a hundred rows is not.
+const tapeRows = 40
 
 func firstLastPrice(ticks []Tick) (first, last float64) {
 	for _, t := range ticks {
@@ -375,7 +598,7 @@ func firstLastPrice(ticks []Tick) (first, last float64) {
 	return first, last
 }
 
-// bpsStr signs a move, but never signs a move too small to have a direction at
+// bpsStr signs a move, but never signs one too small to have a direction at
 // the precision shown: "%+.1f" renders a two-hundredth of a basis point as
 // "-0.0", which reads as a fall that did not happen.
 func bpsStr(v float64) string {
@@ -386,7 +609,7 @@ func bpsStr(v float64) string {
 }
 
 // priceStr picks its decimals from the range on screen rather than the pair, so
-// xrp_jpy at 300.123 and btc_jpy at 15,400,000 both read correctly without the
+// xrp_jpy at 223.041 and btc_jpy at 15,400,000 both read correctly without the
 // renderer knowing which is which.
 func priceStr(v, span float64) string {
 	if v <= 0 {
@@ -406,94 +629,18 @@ func priceStr(v, span float64) string {
 	return fmt.Sprintf("%.*f", d, v)
 }
 
-func (r Report) timelineSection() section {
-	s := section{
-		Title: "Collection over time",
-		Note:  "Share of the ticks each slice should hold. A dip is lost ticks; a gap is the collector not running.",
-		Head:  []string{"from", "records", "expected", "density", "failed"},
-	}
-	for _, b := range r.Timeline {
-		s.Table = append(s.Table, []string{
-			b.At.Format("01-02 15:04"), fmt.Sprint(b.Records), fmt.Sprint(b.Expected),
-			pct(b.Density), fmt.Sprint(b.Errors),
-		})
-	}
-	s.SVG = svgTimeline(r.Timeline)
-	return s
-}
-
-func (r Report) gateSection() section {
-	s := section{
-		Title: "What stopped each tick",
-		Note: "Shadow mode acts on none of this — the gates are a derived column, so a threshold " +
-			"can be re-scored against the same records later.",
-		Head: []string{"gate", "ticks", "share"},
-	}
-	for _, c := range r.Gates {
-		s.Table = append(s.Table, []string{c.Label, fmt.Sprint(c.N), pct(c.Share)})
-	}
-	s.SVG = svgBars(r.Gates)
-	return s
-}
-
-func (d Dist) section() section {
-	note := fmt.Sprintf("%d answers, median %.2f.", d.N, d.Median)
-	if d.Gate > 0 {
-		side := "above"
-		if !d.GateAbove {
-			side = "below"
-		}
-		note += fmt.Sprintf(" %s sits at %.2f; %d answers (%.0f%%) fall %s it.",
-			d.GateLabel, d.Gate, d.OverGate, float64(d.OverGate)/float64(d.N)*100, side)
-	}
-	s := section{
-		Title: "Answers: " + d.Question,
-		Note:  note,
-		Head:  []string{"range", "answers", "share"},
-	}
-	for _, b := range d.Bins {
-		s.Table = append(s.Table, []string{
-			fmt.Sprintf("%.2f–%.2f", b.Lo, b.Hi), fmt.Sprint(b.N), pct(b.Share),
-		})
-	}
-	s.SVG = svgHist(d)
-	return s
-}
-
-func (r Report) calibrationSection() section {
-	c := r.Calibration
-	note := fmt.Sprintf("%s at +%ds, band %.0f bps. %d usable of %d records. "+
-		"Base rate %.3f, Brier %.4f, expected calibration error %.4f. "+
-		"A point above the diagonal happened more often than the model said; below, less.",
-		c.Options.QuestionID, c.Options.HorizonSec, c.Options.BandBps,
-		c.Usable, c.Total, c.BaseRate, c.Brier, c.ECE)
-
-	s := section{Title: "Reliability — stated against realised", Note: note,
-		Head: []string{"bucket", "n", "stated", "realised", "gap"}}
-	for _, b := range c.Bins {
-		if b.N == 0 {
-			s.Table = append(s.Table, []string{fmt.Sprintf("%.1f–%.1f", b.Lo, b.Hi), "0", "—", "—", "—"})
-			continue
-		}
-		s.Table = append(s.Table, []string{
-			fmt.Sprintf("%.1f–%.1f", b.Lo, b.Hi), fmt.Sprint(b.N),
-			fmt.Sprintf("%.3f", b.MeanPredicted), fmt.Sprintf("%.3f", b.Realised),
-			fmt.Sprintf("%+.3f", b.Gap()),
-		})
-	}
-	s.SVG = svgReliability(c)
-	return s
-}
-
 // --- svg --------------------------------------------------------------------
 
 const (
 	chartW = 720.0
 	chartH = 240.0
-	padL   = 44.0
-	padR   = 16.0
-	padT   = 14.0
-	padB   = 30.0
+	// Wide enough for a seven-digit price label at 11px. It used to be 44,
+	// which silently rendered "222.803" as "22.803" once the panel clipped it
+	// — a wrong number, not a cosmetic one.
+	padL = 58.0
+	padR = 16.0
+	padT = 14.0
+	padB = 30.0
 )
 
 func svgOpen(w, h float64) *strings.Builder {
@@ -536,7 +683,7 @@ func svgTimeline(buckets []Bucket) template.HTML {
 		}
 		y := padT + plotH - bh
 		fmt.Fprintf(b, `<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="2" class="mark" `+
-			`tabindex="0" data-tip="%s · %d records of %d · %s"><title>%s — %d of %d (%s)</title></rect>`,
+			`tabindex="0" data-tip="%s ・ %d件 / 想定%d件 ・ %s"><title>%s %d件 / %d件（%s）</title></rect>`,
 			x, y, barW, math.Max(bh, 0),
 			template.HTMLEscapeString(bk.At.Format("01-02 15:04")), bk.Records, bk.Expected, pct(bk.Density),
 			template.HTMLEscapeString(bk.At.Format("01-02 15:04")), bk.Records, bk.Expected, pct(bk.Density))
@@ -546,43 +693,6 @@ func svgTimeline(buckets []Bucket) template.HTML {
 		padL, chartH-10, template.HTMLEscapeString(buckets[0].At.Format("01-02 15:04")))
 	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="end">%s</text>`,
 		chartW-padR, chartH-10, template.HTMLEscapeString(buckets[len(buckets)-1].At.Format("15:04")))
-	b.WriteString(`</svg>`)
-	return template.HTML(b.String())
-}
-
-func svgBars(rows []Count) template.HTML {
-	if len(rows) == 0 {
-		return ""
-	}
-	rowH := 30.0
-	h := padT + float64(len(rows))*rowH + 10
-	labelW := 150.0
-	b := svgOpen(chartW, h)
-
-	max := 0
-	for _, r := range rows {
-		if r.N > max {
-			max = r.N
-		}
-	}
-	plotW := chartW - labelW - padR - 60
-
-	for i, r := range rows {
-		y := padT + float64(i)*rowH
-		w := 0.0
-		if max > 0 {
-			w = plotW * float64(r.N) / float64(max)
-		}
-		fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="label" text-anchor="end">%s</text>`,
-			labelW-10, y+18, template.HTMLEscapeString(r.Label))
-		fmt.Fprintf(b, `<rect x="%.1f" y="%.1f" width="%.1f" height="14" rx="4" class="mark" `+
-			`tabindex="0" data-tip="%s · %d ticks · %s"><title>%s — %d (%s)</title></rect>`,
-			labelW, y+6, math.Max(w, 2),
-			template.HTMLEscapeString(r.Label), r.N, pct(r.Share),
-			template.HTMLEscapeString(r.Label), r.N, pct(r.Share))
-		fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="value">%d · %s</text>`,
-			labelW+math.Max(w, 2)+8, y+18, r.N, pct(r.Share))
-	}
 	b.WriteString(`</svg>`)
 	return template.HTML(b.String())
 }
@@ -614,7 +724,7 @@ func svgHist(d Dist) template.HTML {
 			bh = plotH * bin.Share / maxShare
 		}
 		fmt.Fprintf(b, `<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="2" class="mark" `+
-			`tabindex="0" data-tip="%.2f–%.2f · %d answers · %s"><title>%.2f–%.2f — %d (%s)</title></rect>`,
+			`tabindex="0" data-tip="%.2f〜%.2f ・ %d件 ・ %s"><title>%.2f〜%.2f %d件（%s）</title></rect>`,
 			x, padT+plotH-bh, barW, bh,
 			bin.Lo, bin.Hi, bin.N, pct(bin.Share),
 			bin.Lo, bin.Hi, bin.N, pct(bin.Share))
@@ -669,7 +779,7 @@ func svgReliability(c calib.Report) template.HTML {
 
 	fmt.Fprintf(b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="ref"/>`,
 		left, top+plot, left+plot, top)
-	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="reflabel" text-anchor="start">perfect calibration</text>`,
+	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="reflabel" text-anchor="start">完全に較正された線</text>`,
 		left+plot+8, top+4)
 
 	maxN := 0
@@ -706,17 +816,13 @@ func svgReliability(c calib.Report) template.HTML {
 			bin.MeanPredicted, bin.Realised, bin.N, bin.Gap())
 	}
 
-	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="middle">stated probability</text>`,
+	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="middle">モデルの言い値</text>`,
 		left+plot/2, h-6)
-	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="middle" transform="rotate(-90 %.1f %.1f)">realised</text>`,
+	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="middle" transform="rotate(-90 %.1f %.1f)">実際</text>`,
 		left-46, top+plot/2, left-46, top+plot/2)
 	b.WriteString(`</svg>`)
 	return template.HTML(b.String())
 }
-
-// tapeRows is how much of the tail the tape prints. The chart covers the whole
-// recent window; the table is for reading, and a hundred open rows is not.
-const tapeRows = 30
 
 // svgPrice draws the tail of the log as a price line with one dot per
 // evaluation, each placed at the time it actually happened.
@@ -812,11 +918,13 @@ func svgPrice(ticks []Tick, lo, hi float64) template.HTML {
 		if t.Price <= 0 {
 			continue
 		}
-		tip := fmt.Sprintf("%s · %s · %s bps", t.At.Format("15:04:05"), priceStr(t.Price, span), bpsStr(t.DeltaBps))
+		tip := fmt.Sprintf("%s ・ %s ・ 前回比 %s bps",
+			t.At.Format("15:04:05"), priceStr(t.Price, span), bpsStr(t.DeltaBps))
 		if t.Error != "" {
-			tip += " · call failed"
+			tip += " ・ 呼び出し失敗"
 		} else if t.Action != "" {
-			tip += fmt.Sprintf(" · %s p=%.2f · %s", t.Action, t.Prob, t.Gate)
+			tip += fmt.Sprintf(" ・ %s（確率 %.2f）・ %s",
+				lookup(actionJA, t.Action).Label, t.Prob, gateLabelJA(t.Gate))
 		}
 		fmt.Fprintf(b, `<circle cx="%.1f" cy="%.1f" r="2.4" class="tickdot" tabindex="0" data-tip="%s">`+
 			`<title>%s</title></circle>`,
@@ -828,7 +936,7 @@ func svgPrice(ticks []Tick, lo, hi float64) template.HTML {
 		// shape: a filled diamond, legible without colour beside a ring.
 		if t.Filled {
 			fmt.Fprintf(b, `<path d="M %.1f %.1f l 5 5 l -5 5 l -5 -5 Z" class="fillmark"><title>%s</title></path>`,
-				x(i), y(t.Price)-5, template.HTMLEscapeString("executed at "+t.At.Format("15:04:05")))
+				x(i), y(t.Price)-5, template.HTMLEscapeString(t.At.Format("15:04:05")+" に約定"))
 		}
 	}
 
@@ -836,7 +944,7 @@ func svgPrice(ticks []Tick, lo, hi float64) template.HTML {
 		padL, padT+plotH, chartW-padR, padT+plotH)
 	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis">%s</text>`,
 		padL, h-10, template.HTMLEscapeString(t0.Format("15:04:05")))
-	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="middle">%d ticks</text>`,
+	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="middle">%d回ぶん</text>`,
 		padL+plotW/2, h-10, len(ticks))
 	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="axis" text-anchor="end">%s</text>`,
 		chartW-padR, h-10, template.HTMLEscapeString(tn.Format("15:04:05")))
@@ -875,19 +983,19 @@ func svgPaths(paths []Path) template.HTML {
 	for i, p := range paths {
 		y := padT + float64(i)*rowH
 		fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="label" text-anchor="end">%s</text>`,
-			labelW-10, y+22, template.HTMLEscapeString(p.Style))
+			labelW-10, y+22, template.HTMLEscapeString(styleLabelJA(p.Style)))
 
 		for j, v := range []struct {
 			name string
 			val  float64
-		}{{"gross", p.GrossJPY}, {"net", p.NetJPY}} {
+		}{{"手数料前", p.GrossJPY}, {"手数料後", p.NetJPY}} {
 			by := y + float64(j)*(barH+4)
 			w := plotW / 2 * math.Abs(v.val) / span
 			x := zero
 			if v.val < 0 {
 				x = zero - w
 			}
-			tip := fmt.Sprintf("%s %s: %s", p.Style, v.name, jpy(v.val))
+			tip := fmt.Sprintf("%s ・ %s %s", styleLabelJA(p.Style), v.name, jpy(v.val))
 			fmt.Fprintf(b, `<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="2" class="mark" `+
 				`tabindex="0" data-tip="%s"><title>%s</title></rect>`,
 				x, by, math.Max(w, 1.5), barH, template.HTMLEscapeString(tip), template.HTMLEscapeString(tip))
@@ -899,7 +1007,7 @@ func svgPaths(paths []Path) template.HTML {
 	// The zero line is a reference, not a series.
 	fmt.Fprintf(b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="ref"/>`,
 		zero, padT-4, zero, h-22)
-	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="reflabel" text-anchor="middle">break even</text>`,
+	fmt.Fprintf(b, `<text x="%.1f" y="%.1f" class="reflabel" text-anchor="middle">損益ゼロ</text>`,
 		zero, h-8)
 	b.WriteString(`</svg>`)
 	return template.HTML(b.String())

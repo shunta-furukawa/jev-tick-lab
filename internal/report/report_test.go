@@ -140,9 +140,10 @@ func TestHTMLIsSelfContained(t *testing.T) {
 	}
 	for _, want := range []string{
 		"<svg", "prefers-color-scheme", `data-theme="dark"`, // dark mode is selected, not flipped
-		"Table view",   // every chart has a non-visual reading
-		"data-tip",     // and a hover layer
-		"tick density", // the numbers that matter are tiles, not buried
+		"<table",     // every chart has a non-visual reading beside it
+		"data-tip",   // and a hover layer
+		`role="tab"`, // the detail is in tabs, so nothing is below the fold
+		"ティック取得率",    // the numbers that matter are tiles, not buried
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("page is missing %q", want)
@@ -157,7 +158,7 @@ func TestEmptyLogRendersAnExplanationRatherThanACrash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(html, "No records") {
+	if !strings.Contains(html, "まだ記録がありません") {
 		t.Error("an empty log should say so on the page")
 	}
 }
@@ -199,11 +200,11 @@ func TestHandlerServesAndRebuildsWhenTheLogGrows(t *testing.T) {
 	defer srv.Close()
 
 	body := get(t, srv.URL+"/")
-	if !strings.Contains(body, ">live<") {
-		t.Error("a served page should carry the live badge")
+	if !strings.Contains(body, "最終記録") {
+		t.Error("a served page should say how fresh it is")
 	}
-	if !strings.Contains(body, "jtl-scroll") {
-		t.Error("a served page should keep its scroll position across reloads")
+	if !strings.Contains(body, "jtl-tab") {
+		t.Error("a served page should keep the selected tab across reloads")
 	}
 
 	var health struct {
@@ -331,10 +332,10 @@ func TestTapeMarksWhatTheModelWantedRatherThanTradesItNeverMade(t *testing.T) {
 		t.Errorf("rings = %d, want 2", rings)
 	}
 
-	// And the section has to say so, in words, rather than leaving a reader to
+	// And the panel has to say so, in words, rather than leaving a reader to
 	// assume the rings were fills.
-	note := rep.priceSection().Note
-	if !strings.Contains(note, "Shadow mode fills none of it") {
+	note := rep.chartPanel().Note
+	if !strings.Contains(note, "注文は一切出していません") {
 		t.Errorf("the note does not disclaim execution: %q", note)
 	}
 }
@@ -391,7 +392,7 @@ func TestACadenceMismatchIsCalledOutRatherThanReportedAsBrokenCollection(t *test
 	if rep.ObservedTick != 3*time.Second {
 		t.Fatalf("observed cadence = %s, want 3s", rep.ObservedTick)
 	}
-	if !strings.Contains(warnings(rep), "records are 3s apart") {
+	if !strings.Contains(warnings(rep), "実際には3秒おき") {
 		t.Errorf("no cadence warning; the page reports %s density instead", pct(rep.Density))
 	}
 
@@ -504,15 +505,15 @@ func TestALiveRunSaysSoInWordsRatherThanLeavingItToBeInferred(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(page, "real orders") {
+	if !strings.Contains(page, "本物の注文が出ています") {
 		t.Error("the page does not warn that this is real money")
 	}
-	if strings.Contains(page, "Paper execution") {
-		t.Error("a live run is labelled as paper execution")
+	if strings.Contains(page, "模擬売買") {
+		t.Error("a live run is labelled as a simulation")
 	}
 	// And the brake state has to be visible, since it is the thing that
 	// decides whether the bot is still allowed to trade.
-	if !strings.Contains(page, "no brake on") {
+	if !strings.Contains(page, "ブレーキ") {
 		t.Error("the risk verdict is not shown")
 	}
 }
@@ -527,7 +528,80 @@ func TestAPaperRunIsNeverLabelledLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(page, "real orders") {
+	if strings.Contains(page, "本物の注文が出ています") {
 		t.Error("a paper run claims to place real orders")
+	}
+}
+
+func TestThePageIsInJapaneseAndNamesItsMode(t *testing.T) {
+	t.Parallel()
+	// The page has one reader and they read Japanese. An English dashboard
+	// over a live run is not a cosmetic problem: it is somebody unable to tell
+	// what their money is doing.
+	for mode, want := range map[string]string{
+		"shadow": "影運転",
+		"paper":  "模擬売買",
+	} {
+		recs := records(40, func(i int, r *obs.Record) {
+			r.Mode = mode
+			if mode == "paper" {
+				r.Paper = []exec.StyleState{{Style: "taker"}, {Style: "maker"}}
+			}
+		})
+		page, err := Build(recs, DefaultOptions()).HTML()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(page, want) {
+			t.Errorf("%s run does not name its mode as %q", mode, want)
+		}
+		if !strings.Contains(page, `lang="ja"`) {
+			t.Errorf("%s: the document is not declared Japanese", mode)
+		}
+	}
+}
+
+func TestEveryGateIsExplainedRatherThanNamed(t *testing.T) {
+	t.Parallel()
+	// "gate=entry_quality" tells a reader nothing. Every value decide can
+	// emit needs a Japanese label and a line saying why it stopped the trade.
+	for _, g := range []string{
+		"", "decision_age", "feed", "halt", "anomaly", "hold_risk", "confidence",
+		"pyramid", "entry_quality", "fakeout", "spread", "wait", "flat",
+	} {
+		key := gateLabel(g) // the label the report stores, "" folded to a phrase
+		term, ok := gateJA[key]
+		if !ok {
+			t.Errorf("gate %q has no Japanese entry (looked up %q)", g, key)
+			continue
+		}
+		if term.Label == "" || term.Why == "" {
+			t.Errorf("gate %q is named but not explained: %+v", g, term)
+		}
+	}
+}
+
+func TestEveryQuestionIsExplained(t *testing.T) {
+	t.Parallel()
+	// Same rule for the answer distributions: the id is the dataset's column
+	// name, not something a person should have to interpret.
+	for _, id := range []string{
+		jev.QRegime, jev.QMomentum, jev.QVolatility, jev.QFakeout, jev.QBookPressure,
+		jev.QAction, jev.QEntryScore, jev.QAnomaly, jev.QHoldRisk,
+	} {
+		term, ok := questionJA[id]
+		if !ok || term.Label == "" || term.Why == "" {
+			t.Errorf("question %q is not explained: %+v", id, term)
+		}
+	}
+}
+
+func TestAnUnknownIdFallsBackToItselfRatherThanVanishing(t *testing.T) {
+	t.Parallel()
+	// A gate appended to decide but not yet to this file must still show up.
+	// An empty cell would hide it exactly when someone is trying to find out
+	// why the bot stopped trading.
+	if got := gateLabelJA("some_new_gate"); got != "some_new_gate" {
+		t.Errorf("unknown gate rendered as %q, want the raw id", got)
 	}
 }

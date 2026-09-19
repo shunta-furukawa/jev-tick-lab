@@ -127,6 +127,7 @@ type Report struct {
 	Options Options
 
 	Pair      string
+	RunMode   string // observe | shadow | paper | live, from the records
 	Models    []string
 	Runs      []string
 	From, To  time.Time
@@ -225,6 +226,7 @@ func Build(records []obs.Record, opt Options) Report {
 	rep.From, rep.To = sorted[0].At.UTC(), sorted[len(sorted)-1].At.UTC()
 	rep.Records = len(sorted)
 	rep.Pair = sorted[0].Pair
+	rep.RunMode = sorted[len(sorted)-1].Mode
 
 	var (
 		models   = map[string]bool{}

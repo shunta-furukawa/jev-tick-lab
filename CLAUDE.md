@@ -115,7 +115,7 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `internal/risk` | Daily loss cap, trade and rate caps, dead-man switch, reconciliation | Any I/O; pure, like `decide` |
 | `internal/calib` | Reliability bins, Brier, ECE, outcome definitions | Any I/O; `cmd/calib` reads the files |
 | `internal/health` | Whether a running collection is still producing usable data | Any I/O; `cmd/logcheck` reads the files and picks the exit code |
-| `internal/report` | Turning a tick log into a page: summaries, the tick-by-tick tape, SVG, the HTML | Any I/O; `cmd/report` reads and writes the files. Claiming a trade — shadow mode fills nothing |
+| `internal/report` | Turning a tick log into a one-screen Japanese page: summaries, the tape, SVG, the HTML | Any I/O; `cmd/report` reads and writes the files. Claiming a trade — shadow mode fills nothing. Renaming an id: `ja.go` is display only |
 
 | Command | Does |
 |---|---|
@@ -223,10 +223,29 @@ HTML page — no CDN, no fonts, no external scripts — because it has to open f
 a laptop, from a GCS bucket, and from an archive in a year's time, which is the
 same standard the JSONL is held to. `TestHTMLIsSelfContained` enforces it.
 
-Chart colours come from a validated palette and the marks use one hue. Status
-colours appear only in stat tiles, always beside a word: status-good and
-status-critical are four Delta E apart under deuteranopia, so they may never
-carry meaning alone.
+**The dashboard is in Japanese, and every identifier on it is explained.** It
+has one reader. An English page over a live run is not a cosmetic problem — it
+is somebody unable to tell what their money is doing. `internal/report/ja.go`
+is a display layer only: every key in it is a value `decide`, `risk` or `jev`
+emits, and renaming one of those would break the dataset (rule 6). Each entry
+carries a label *and* a line saying why it matters, because "gate=entry_quality"
+tells a reader nothing. An id with no entry falls back to the raw id rather
+than an empty cell — a gate appended to `decide` but not yet here must still
+appear, precisely when someone is trying to find out why the bot stopped.
+
+**It fits one screen.** The shell is a viewport-height grid and the detail is
+in tabs, not below the fold, so a maximised browser needs no scrolling: the
+chart and the tape on the left, the execution standing and the reasons on the
+right. Below about 760px of viewport height the grid is released and the page
+scrolls normally, because cramming it would be worse. A panel that overflows
+scrolls inside itself; the page never does.
+
+Chart colours come from a validated palette (`#2a78d6`/`#eb6834`, validated in
+both modes) and a single-series chart uses one hue. Status colours appear only
+in stat tiles, always beside a word: status-good and status-critical are four
+Delta E apart under deuteranopia, so they may never carry meaning alone. The
+marks that distinguish a *call* from a *fill* are shapes — a ring and a
+diamond — for the same reason.
 
 **Paper mode runs both execution paths, never one.** Maker and taker are not
 variants of a strategy. All-taker is 24bps a round trip and always fills;
