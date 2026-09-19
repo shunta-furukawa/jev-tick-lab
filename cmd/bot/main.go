@@ -5,13 +5,17 @@
 //	observe  stream + state only, no model calls        (phase 1)
 //	shadow   stream + Jev + full logging, NO trading    (phase 2, the default)
 //	paper    shadow + simulated fills, no real orders   (phase 4)
-//	live     real orders                                (phase 5, not implemented)
+//	live     REAL ORDERS, real money                    (phase 5)
+//
+// Live mode needs -i-understand-this-spends-real-money. There is no default
+// that trades: arming it is a thing you type, once, deliberately.
 package main
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -22,12 +26,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shunta-furukawa/jev-tick-lab/internal/bitbank"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/decide"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/exec"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/jev"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/marketstate"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/obs"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/report"
+	"github.com/shunta-furukawa/jev-tick-lab/internal/risk"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/stream"
 )
 
@@ -55,6 +61,16 @@ func main() {
 		orderLatency = flag.Duration("order-latency", 150*time.Millisecond, "paper: round trip to bitbank; an order does not exist until it arrives")
 		makerTimeout = flag.Duration("maker-timeout", 30*time.Second, "paper: cancel a resting order that has not filled")
 		crossAfter   = flag.Bool("cross-after-timeout", false, "paper: take the spread when a maker entry times out")
+
+		// Live mode. The brakes are flags so they can be tightened without a
+		// rebuild; none of them defaults to unlimited, because the default is
+		// what runs when someone is in a hurry.
+		armed        = flag.Bool("i-understand-this-spends-real-money", false, "required for -mode live")
+		liveStyle    = flag.String("live-style", "taker", "live: taker crosses the spread and fills; maker rests at the touch and often does not")
+		maxDailyLoss = flag.Float64("max-daily-loss-jpy", 1000, "live: stop opening once the day's realised loss reaches this")
+		maxTrades    = flag.Int("max-trades-per-day", 200, "live: caps the fee bleed, which the order size does not")
+		maxOrdersMin = flag.Int("max-orders-per-minute", 10, "live: the runaway brake")
+		staleAfter   = flag.Duration("flatten-after", 15*time.Second, "live: flatten when the feed has been silent this long")
 	)
 	flag.Parse()
 
@@ -66,17 +82,30 @@ func main() {
 	paperCfg.MakerTimeout = *makerTimeout
 	paperCfg.CrossAfterTimeout = *crossAfter
 
-	if err := run(log, *pair, *mode, *model, *logDir, *tick, *timeout, *minHist, *printState, *serve, paperCfg); err != nil {
+	limits := risk.DefaultLimits()
+	limits.MaxDailyLossJPY = *maxDailyLoss
+	limits.MaxNotionalJPY = *notional
+	limits.MaxOpenNotionalJPY = *notional
+	limits.MaxTradesPerDay = *maxTrades
+	limits.MaxOrdersPerMinute = *maxOrdersMin
+	limits.StaleAfter = *staleAfter
+
+	if err := run(log, *pair, *mode, *model, *logDir, *tick, *timeout, *minHist, *printState, *serve,
+		paperCfg, limits, exec.Style(*liveStyle), *armed); err != nil {
 		log.Error("exiting", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minHist time.Duration, printState bool, serveAddr string, paperCfg exec.Config) error {
+func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minHist time.Duration,
+	printState bool, serveAddr string, paperCfg exec.Config, limits risk.Limits, liveStyle exec.Style, armed bool) error {
 	switch mode {
 	case "observe", "shadow", "paper":
 	case "live":
-		return fmt.Errorf("live mode is not implemented; see CLAUDE.md phase 5")
+		if !armed {
+			return fmt.Errorf("live mode places real orders with real money. " +
+				"Re-run with -i-understand-this-spends-real-money if that is what you want")
+		}
 	default:
 		return fmt.Errorf("unknown mode %q", mode)
 	}
@@ -185,6 +214,32 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 	// which starts flat because nothing it simulates is real.
 	var position marketstate.Position
 
+	// Live mode: establish the truth before anything else, and refuse to start
+	// if it cannot be established. CLAUDE.md rule 7.
+	var live *exec.Live
+	var guard *risk.Guard
+	if mode == "live" {
+		var err error
+		live, guard, err = setUpLive(ctx, log, logger, pair, runID, liveStyle, limits)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			// Withdraw anything resting. Open positions are deliberately left
+			// open: liquidating on shutdown reports a P&L that depended on
+			// when the process was killed.
+			shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := live.CancelWorking(shutCtx); err != nil {
+				log.Error("could not cancel the working order on shutdown — CHECK THE EXCHANGE", "err", err)
+			}
+			if pos := live.Position(); !pos.IsFlat() {
+				log.Warn("exiting with an open position, which is left as it is",
+					"side", pos.Side, "size", pos.Size, "entry", pos.EntryPrice)
+			}
+		}()
+	}
+
 	var trader *exec.Trader
 	if mode == "paper" {
 		trader = exec.NewTrader(paperCfg, thresholds)
@@ -211,7 +266,7 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 	// whatever it happened to be at the next evaluation — at a 3s cadence that
 	// difference is most of the fill.
 	var pumpC <-chan time.Time
-	if trader != nil {
+	if trader != nil || live != nil {
 		pump := time.NewTicker(100 * time.Millisecond)
 		defer pump.Stop()
 		pumpC = pump.C
@@ -248,12 +303,41 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 			return nil
 
 		case at := <-pumpC:
-			execs, cancels := trader.Pump(book, at.UTC())
-			for _, e := range execs {
-				recordFill(log, logger, runID, pair, mode, e)
+			now := at.UTC()
+			if trader != nil {
+				execs, cancels := trader.Pump(book, now)
+				for _, e := range execs {
+					recordFill(log, logger, runID, pair, mode, e)
+				}
+				for _, c := range cancels {
+					recordCancel(log, logger, runID, pair, mode, c)
+				}
 			}
-			for _, c := range cancels {
-				recordCancel(log, logger, runID, pair, mode, c)
+			if live != nil {
+				execs, err := live.Poll(ctx, now)
+				if err != nil {
+					log.Error("poll the working order", "err", err)
+				}
+				for _, e := range execs {
+					recordFill(log, logger, runID, pair, mode, e)
+					if e.Closed != nil {
+						guard.RecordRoundTrip(now, e.Closed.NetJPY)
+					}
+				}
+				// The dead-man switch. A feed that has gone quiet means the
+				// bot is holding something it cannot see — on a laptop, that
+				// is usually a closed lid.
+				snap := book.Snapshot(now)
+				if v, why := guard.Allow(liveFact(now, snap, live, limits)); v == risk.ExitOnly &&
+					!live.Position().IsFlat() && !live.Working() && snap.Stale {
+					log.Warn("flattening", "reason", why)
+					if _, err := live.Submit(ctx, now, decide.Signal{At: now, Intent: decide.IntentClose},
+						snap, v, limits.MaxNotionalJPY); err != nil {
+						log.Error("could not flatten", "err", err)
+					} else {
+						guard.RecordOrder(now)
+					}
+				}
 			}
 
 		case now := <-ticker.C:
@@ -311,11 +395,14 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 			go func(now time.Time, snap marketstate.Snapshot, pos marketstate.Position) {
 				defer inFlight.Store(false)
 				evaluate(ctx, log, client, logger, questions, thresholds, now, snap, pos, evalOpts{
-					runID:   runID,
-					model:   model,
-					mode:    mode,
-					timeout: timeout,
-					trader:  trader,
+					runID:    runID,
+					model:    model,
+					mode:     mode,
+					timeout:  timeout,
+					trader:   trader,
+					live:     live,
+					guard:    guard,
+					notional: limits.MaxNotionalJPY,
 				})
 				evaluated.Add(1)
 			}(now.UTC(), snap, pos)
@@ -333,6 +420,12 @@ type evalOpts struct {
 	// and the gating, because the gates that read a position must see the
 	// path's real one.
 	trader *exec.Trader
+
+	// live and guard are nil outside live mode. guard decides whether a
+	// signal is allowed to become an order at all.
+	live     *exec.Live
+	guard    *risk.Guard
+	notional float64
 }
 
 func evaluate(
@@ -388,9 +481,16 @@ func evaluate(
 	rec.OutputTokens = resp.Usage.OutputTokens
 
 	decidedAt := time.Now().UTC()
-	if opts.trader == nil {
+	switch {
+	case opts.live != nil:
 		rec.Signal = decide.Compose(now, decidedAt, snap, resp.Answers, pos, thresholds)
-	} else {
+		placeLive(ctx, log, opts, rec.Signal, snap, decidedAt)
+		rec.Paper = []exec.StyleState{liveState(opts, snap, decidedAt)}
+
+	case opts.trader == nil:
+		rec.Signal = decide.Compose(now, decidedAt, snap, resp.Answers, pos, thresholds)
+
+	default:
 		// The trader composes once per execution path, because the maker and
 		// taker books diverge and the position gates must see the truth for
 		// the path they gate. The record carries the taker path's signal and
@@ -506,4 +606,160 @@ func recordCancel(log *slog.Logger, logger *obs.Logger, runID, pair, mode string
 		log.Error("fill log write", "err", err)
 	}
 	log.Info("cancelled", "style", rec.Style, "unfilled", rec.Unfilled, "reason", rec.Reason)
+}
+
+// setUpLive prepares real trading, or refuses to.
+//
+// Everything here is a precondition, not a nicety. The order is deliberate:
+// read the venue's own rules, then find out what is actually held, and only
+// then allow a decision to become an order.
+func setUpLive(ctx context.Context, log *slog.Logger, logger *obs.Logger,
+	pair, runID string, style exec.Style, limits risk.Limits) (*exec.Live, *risk.Guard, error) {
+
+	key, secret := os.Getenv("BITBANK_API_KEY"), os.Getenv("BITBANK_API_SECRET")
+	if key == "" || secret == "" {
+		return nil, nil, fmt.Errorf("live mode needs BITBANK_API_KEY and BITBANK_API_SECRET in the environment " +
+			"(never on the command line, never in a file this repo can see)")
+	}
+
+	// The venue's own rules: fees, the minimum size, the rounding, and whether
+	// it is accepting orders at all. Fetched rather than configured, so the
+	// numbers cannot be stale.
+	rules, err := bitbank.FetchPairRules(ctx, bitbank.DefaultEndpoint, pair)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read the pair rules: %w", err)
+	}
+	if !rules.TradingAllowed() {
+		return nil, nil, fmt.Errorf("bitbank is not accepting orders on %s right now", pair)
+	}
+	log.Info("venue rules",
+		"pair", rules.Name, "maker_bps", rules.MakerFeeBps, "taker_bps", rules.TakerFeeBps,
+		"min_size", rules.UnitAmount, "price_digits", rules.PriceDigits, "amount_digits", rules.AmountDigits)
+
+	client := bitbank.New(key, secret)
+
+	// Rule 7. Never trust local state for what is held.
+	rec, err := risk.Reconcile(ctx, client, pair, rules.UnitAmount)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reconcile against the exchange: %w", err)
+	}
+	for _, note := range rec.Notes {
+		log.Warn("reconciliation", "note", note)
+	}
+	log.Info("reconciled",
+		"position_size", rec.Position.Size, "base_free", rec.BaseFree,
+		"quote_free", rec.QuoteFree, "cancelled_orders", len(rec.Cancelled))
+
+	if rec.QuoteFree < limits.MaxNotionalJPY && rec.Position.IsFlat() {
+		log.Warn("the account holds less than one order's worth of JPY; entries will be rejected",
+			"jpy_free", rec.QuoteFree, "order_size", limits.MaxNotionalJPY)
+	}
+
+	cfg := exec.DefaultLiveConfig(pair, rules)
+	cfg.Style = style
+	l := exec.NewLive(client, cfg)
+	l.Adopt(rec.Position)
+
+	log.Warn("LIVE MODE ARMED — this places real orders with real money",
+		"pair", pair, "style", string(style),
+		"order_size_jpy", limits.MaxNotionalJPY,
+		"max_daily_loss_jpy", limits.MaxDailyLossJPY,
+		"max_trades_per_day", limits.MaxTradesPerDay,
+		"flatten_after", limits.StaleAfter.String())
+
+	return l, risk.New(limits), nil
+}
+
+// liveFact assembles what the risk layer needs to know right now.
+func liveFact(now time.Time, snap marketstate.Snapshot, live *exec.Live, limits risk.Limits) risk.Fact {
+	pos := live.Position()
+	open := pos.Size * snap.Last
+
+	age := time.Duration(0)
+	if snap.Stale {
+		// Snapshot reports staleness as a boolean rather than an age, so
+		// report just past the threshold: enough to trip the brake, not enough
+		// to claim a precision the snapshot does not have.
+		age = limits.StaleAfter + time.Second
+	}
+	return risk.Fact{
+		Now:     now,
+		FeedAge: age,
+		// The position came from the exchange at startup and has been tracked
+		// by the executor since. Rule 7 is satisfied by setUpLive refusing to
+		// start otherwise.
+		Reconciled:      true,
+		OpenNotionalJPY: open,
+		PairTradable:    !snap.Halted() && snap.BookSynced,
+	}
+}
+
+// placeLive turns a signal into a real order, if the brakes allow it.
+func placeLive(ctx context.Context, log *slog.Logger, opts evalOpts,
+	sig decide.Signal, snap marketstate.Snapshot, now time.Time) {
+
+	if sig.Intent == decide.IntentNone {
+		return
+	}
+	verdict, why := opts.guard.Allow(liveFact(now, snap, opts.live, opts.guard.Limits()))
+	if verdict != risk.Trade && sig.Intent != decide.IntentClose {
+		log.Info("entry withheld", "verdict", string(verdict), "reason", why, "intent", string(sig.Intent))
+		return
+	}
+
+	size := opts.guard.EntryNotional(opts.live.Position().Size * snap.Last)
+	if sig.Intent != decide.IntentClose && size <= 0 {
+		log.Info("entry withheld", "reason", "no room under the exposure cap")
+		return
+	}
+
+	order, err := opts.live.Submit(ctx, now, sig, snap, verdict, size)
+	switch {
+	case errors.Is(err, exec.ErrBusy):
+		// Skip, never queue: a second order on a stale decision is the
+		// accident this whole design is arranged to avoid.
+		log.Info("skipped", "reason", "an order is already working")
+	case errors.Is(err, exec.ErrShortOnSpot):
+		log.Info("skipped", "reason", "the model called a short and this is spot")
+	case err != nil:
+		log.Error("ORDER REJECTED", "err", err, "intent", string(sig.Intent))
+	case order != nil:
+		opts.guard.RecordOrder(now)
+		log.Warn("ORDER PLACED", "order_id", order.OrderID, "side", order.Side,
+			"type", order.Type, "amount", order.StartAmount, "price", order.Price,
+			"intent", string(sig.Intent), "reason", sig.Reason)
+	}
+}
+
+// liveState reports the live path in the same shape the paper paths use, so
+// the record schema and the dashboard do not need a second variant.
+func liveState(opts evalOpts, snap marketstate.Snapshot, now time.Time) exec.StyleState {
+	l := opts.live
+	pos := l.Position()
+	led := l.Ledger()
+	wins, trips := led.Wins()
+
+	working := 0
+	if l.Working() {
+		working = 1
+	}
+	// The verdict and the reason a brake is on are the two things worth
+	// seeing on a page about real money, so they ride in the same fields the
+	// paper paths use for intent and gate.
+	verdict, why := opts.guard.Allow(liveFact(now, snap, l, opts.guard.Limits()))
+	if why == "" {
+		why = "no brake on"
+	}
+	return exec.StyleState{
+		Style:     "live",
+		Intent:    string(verdict),
+		Gate:      why,
+		Position:  pos,
+		Working:   working,
+		RoundTrip: trips,
+		Wins:      wins,
+		NetJPY:    led.NetJPY(),
+		FeesJPY:   led.FeesJPY(),
+		UnrealJPY: led.MarkToMarket(pos.EntryPrice),
+	}
 }

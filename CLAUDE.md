@@ -110,14 +110,16 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `internal/jev` | HTTP client, question definitions | Any decision logic |
 | `internal/decide` | Thresholds, gating order, signal composition | Any I/O; must stay pure and testable |
 | `internal/obs` | JSONL records, rotation | Any blocking work in the hot path |
-| `internal/exec` | Fill simulation, the position ledger, order placement | Reading Jev answers directly — it consumes `decide.Signal` only |
+| `internal/exec` | Fill simulation, the position ledger, live order placement | Reading Jev answers directly — it consumes `decide.Signal` only |
+| `internal/bitbank` | Signed private REST: orders, cancels, balances, pair rules | Withdraw. The endpoints are not implemented at all |
+| `internal/risk` | Daily loss cap, trade and rate caps, dead-man switch, reconciliation | Any I/O; pure, like `decide` |
 | `internal/calib` | Reliability bins, Brier, ECE, outcome definitions | Any I/O; `cmd/calib` reads the files |
 | `internal/health` | Whether a running collection is still producing usable data | Any I/O; `cmd/logcheck` reads the files and picks the exit code |
 | `internal/report` | Turning a tick log into a page: summaries, the tick-by-tick tape, SVG, the HTML | Any I/O; `cmd/report` reads and writes the files. Claiming a trade — shadow mode fills nothing |
 
 | Command | Does |
 |---|---|
-| `cmd/bot` | The tick loop. `-mode observe\|shadow\|paper` |
+| `cmd/bot` | The tick loop. `-mode observe\|shadow\|paper\|live` |
 | `cmd/dump` | Prints raw stream frames. Does not import `internal/stream`, so it shows the wire rather than our reading of it |
 | `cmd/fill` | Forward-fill: joins each logged tick to the price 10s/60s/300s later |
 | `cmd/calib` | The calibration report: stated probability against realised frequency |
@@ -279,6 +281,52 @@ change of setting rather than a change of belief.
 **Shutdown cancels orders and never closes positions.** A paper run that
 liquidates on Ctrl-C reports a P&L that depended on when you pressed it. Open
 positions stay open and marked.
+
+**Live mode is the only code here that writes to the market.** Everything else
+reads: a bug costs a wrong number in a log file. Once `-mode live` is running a
+bug spends money, at one decision per second, without getting tired. Three
+things follow.
+
+`internal/bitbank` **cannot withdraw.** The endpoints are not implemented — not
+behind a flag, not behind a config option, absent. A test asserts the type has
+no `Withdraw` method, so adding one has to be deliberate. The API key should
+also be issued without 出金, so the restriction holds on both sides.
+
+**The signature covers exactly the bytes sent.** The body is marshalled once
+and both signed and transmitted from that slice. Re-marshalling in between
+produces a signature valid for a request nobody made, which the exchange
+rejects with an opaque authentication error. The signing is tested against
+bitbank's own four published vectors, so it is known correct before a real key
+touches it.
+
+**Fees and pair rules are fetched, not configured.** `GET /spot/pairs` is
+public and carries the live maker and taker rates, the minimum order size, the
+price and amount precision, and whether the venue is accepting orders. A config
+file can go stale; this cannot. Sizes round **down** and limit prices round
+**away from the mid**, because rounding a buy up can cross the spread and
+silently turn the −2bps path into the +12bps one.
+
+**The order size bounds nothing on its own.** 3,000 JPY recycled 500 times pays
+500 round trips of fees. `MaxTradesPerDay` is the limit that actually caps the
+bleed; `MaxOrdersPerMinute` catches a submit-and-cancel loop, which moves no
+position and trips no other limit while still paying for every crossing. A
+tripped cap stays tripped for the UTC day — otherwise a winning trade lifts the
+brake and the bot trades back through the cap a few JPY at a time.
+
+**Every brake lets a position out and none lets a new one in.** `risk.ExitOnly`
+is the important middle state. A brake that traps a position is not a brake.
+`risk.Halt` is reserved for "we cannot see what we are doing": unreconciled, or
+a venue that is not accepting orders.
+
+**Startup refuses to guess.** `risk.Reconcile` cancels every working order on
+the pair — the bot cannot reason about an instruction it has no record of — and
+adopts whatever base balance the exchange reports as an open position, with
+entry price left at **zero**. The exchange knows what is held, never what was
+paid for it; inventing a cost basis would produce a P&L that is fiction. A
+failed balance read is an error, never a flat position.
+
+**Shutdown cancels orders and leaves positions open**, in live mode as in
+paper, and for the same reason.
 
 **Health is a property of the data, not of the process.** systemd restarts a
 dead bot. It cannot see the failure that actually costs this experiment its
@@ -522,7 +570,7 @@ Do not skip ahead. Each phase gates the next.
 | 2 | `shadow` | 🔨 code complete, not yet run for real | Several days of clean tick logs, no trading |
 | 3 | — | 🔨 tooling built (`cmd/fill`, `cmd/calib`), no real data yet | Calibration analysis run; question set revised on the evidence |
 | 4 | `paper` | 🔨 built and unit tested, never run against a live market | Fill simulator with realistic maker/taker and queue assumptions |
-| 5 | `live` | ⬜ blocked, `-mode live` exits with an error | Minimum size only, after daily loss cap + flatten-on-death exist |
+| 5 | `live` | 🔨 built and unit tested, never run against the real exchange. Needs `-i-understand-this-spends-real-money` | Minimum size only, after daily loss cap + flatten-on-death exist |
 
 **Phase 2 is where the value is.** It requires no execution code at all and
 answers the interesting question. Resist building the executor early.
@@ -552,6 +600,10 @@ means it typechecks, has tests against a fake, and has never met production.
 | `cmd/fill`, `cmd/calib` | ❌ synthetic input only |
 | `marketstate.Ladder`, `TradesAfter` | ✅ 35 min live: ~200 levels a side, zero crossed books, zero out-of-order levels, zero duplicated or replayed prints |
 | the fill simulator | ⚠️ unit tested hard, including the 24bps round trip — but it has never seen a live market, because that needs an API key and a running phase 4 |
+| bitbank request signing | ✅ matches all four of the vendor's published vectors |
+| bitbank pair rules and fees | ✅ read from the live public endpoint: xrp_jpy maker −2bps, taker 12bps, min size 0.0001, 3/4 digits |
+| `internal/risk` | ⚠️ pure and heavily tested, never exercised against a real account |
+| the live order path | ❌ **never run.** Tested against a fake venue only. No order has ever been placed by this code |
 | Terraform | ❌ never applied to a project |
 | `deploy/deploy.sh` | ❌ syntax checked only |
 
@@ -590,11 +642,17 @@ stays awake.
    between networks, and every one of those is a gap. ~$12 for five days.
    See [docs/operations.md](docs/operations.md).
 
-5. **Phase 3.** Expect to find that some question has no usable ground truth.
+5. **Before any live run: one day of `make paper`.** It costs the same API
+   money as shadow and places nothing. If the paper path does not produce
+   trades you would have been willing to make, live will not either — it will
+   just make them with your money. The live code exists now; the case for
+   running it does not yet.
+
+6. **Phase 3.** Expect to find that some question has no usable ground truth.
    Start with `book_pressure`: phase 1 measured the book as bid-heavy 70% of the
    time, so its base rate may be structural rather than informative.
 
-6. ~~`internal/exec/paper.go`~~ — **built 2026-09-19**, at the owner's
+7. ~~`internal/exec/paper.go`~~ — **built 2026-09-19**, at the owner's
    direction and out of the phase order. It is a simulator, not a result: the
    thresholds it trades on are still the untuned defaults, so treat a paper
    P&L as "what these particular gates did", not "what the strategy does".
@@ -607,9 +665,11 @@ stays awake.
 ## Things deliberately not built
 
 - **Backtester.** See rule 1.
-- **Live order placement.** Phase 5; `-mode live` exits with an error. Paper
-  mode places nothing and needs no bitbank credentials — it simulates against
-  the public book.
+- **Withdrawal.** `internal/bitbank` has no withdrawal method and must not
+  grow one. Nothing in this experiment moves money off the exchange.
+- **Shorting.** Spot has no borrow. `decide` emits `IntentOpenShort` because
+  the model is asked a symmetric question; both the simulator and the live
+  executor refuse it.
 - **Margin/leverage.** Spot only.
 - **Multi-pair.** One pair per process. Run more processes if needed.
 

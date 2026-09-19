@@ -51,7 +51,11 @@ func (o Order) Executed() float64  { return num(o.ExecutedAmount) }
 func (o Order) Remaining() float64 { return num(o.RemainingAmount) }
 func (o Order) AvgPrice() float64  { return num(o.AveragePrice) }
 
-func num(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
+// Num parses one of bitbank's string-encoded numbers. Exported because the
+// live executor reads prices back off an Order.
+func Num(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
+
+func num(s string) float64 { return Num(s) }
 
 // NewOrder is a request to place one order.
 //

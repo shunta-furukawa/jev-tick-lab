@@ -1,4 +1,4 @@
-.PHONY: help build build-linux build-all run-observe run-shadow paper dump logcheck watch serve report preflight preflight-dry check test race vet fmt fmt-check tidy clean deploy
+.PHONY: help build build-linux build-all run-observe run-shadow paper live dump logcheck watch serve report preflight preflight-dry check test race vet fmt fmt-check tidy clean deploy
 
 # `make help` lists what exists. If a target you expect is missing, the checkout
 # is older than you think — see the phase order in CLAUDE.md.
@@ -8,6 +8,7 @@ help:
 	@echo "  running"
 	@echo "    watch           collect AND serve the live dashboard at 1s, one command"
 	@echo "    paper           phase 4: the same, with simulated fills on both execution paths"
+	@echo "    live            phase 5: REAL ORDERS. Needs bitbank keys and an explicit flag"
 	@echo "    serve           just the dashboard, against ./data"
 	@echo "    run-observe     phase 1: stream and state only, no model calls, no key"
 	@echo "    run-shadow      phase 2: evaluate and log at the deployed 3s cadence"
@@ -70,6 +71,23 @@ watch:
 paper:
 	go run ./cmd/bot -pair xrp_jpy -mode paper -model jev-1.13.0 -tick 1s \
 		-notional-jpy 10000 -log-dir ./data -serve 127.0.0.1:8080
+
+# Phase 5. This spends real money.
+#
+# Needs BITBANK_API_KEY and BITBANK_API_SECRET in the environment — issued
+# WITHOUT 出金 (withdrawal) permission. Never put them on the command line,
+# where they land in your shell history.
+#
+# The defaults are small on purpose: 3,000 JPY an order, 1,000 JPY of realised
+# loss a day, 200 trades a day, and it flattens if the feed goes quiet for 15s.
+# Raise them once you have watched it, not before.
+live:
+	@test -n "$$BITBANK_API_KEY" || { echo "BITBANK_API_KEY is not set"; exit 1; }
+	@test -n "$$BITBANK_API_SECRET" || { echo "BITBANK_API_SECRET is not set"; exit 1; }
+	go run ./cmd/bot -pair xrp_jpy -mode live -model jev-1.13.0 -tick 1s \
+		-i-understand-this-spends-real-money \
+		-notional-jpy 3000 -max-daily-loss-jpy 1000 -max-trades-per-day 200 \
+		-log-dir ./data -serve 127.0.0.1:8080
 
 # Just the dashboard, against whatever is already in ./data. -tick must match
 # the cadence the log was collected at; the page says so if it does not.

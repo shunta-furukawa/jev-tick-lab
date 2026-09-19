@@ -178,3 +178,33 @@ whole procedure. Two things follow from the restart:
 To revoke in a hurry: disable the version in Secret Manager and stop the unit.
 The running process already holds the old key in memory, so the secret alone is
 not a kill switch — stopping the service is.
+
+## bitbank keys (phase 5, live trading)
+
+Two values, `BITBANK_API_KEY` and `BITBANK_API_SECRET`, read from the process
+environment and nowhere else. They rotate as a pair, so on the VM they belong
+in one JSON secret rather than two.
+
+**Issue the key with 参照 and 取引 only. Never 出金.** bitbank grants the three
+separately. Nothing in this experiment moves money off the exchange, and
+`internal/bitbank` has no withdrawal method to call even if the key allowed it
+— the restriction is meant to hold on both sides, so that neither a code bug
+nor a key mistake is sufficient on its own.
+
+Running locally:
+
+```sh
+read -rs BITBANK_API_KEY    && export BITBANK_API_KEY
+read -rs BITBANK_API_SECRET && export BITBANK_API_SECRET
+make live
+```
+
+`read -rs` keeps the value off the terminal and out of shell history. Do not
+pass either as a command-line flag: arguments are visible in `ps` to every
+process on the machine.
+
+**The deposit is the real limit.** Spot has no borrow, so the account balance
+is the maximum this can lose — a bound enforced by the exchange rather than by
+software, which means no bug in this repository can exceed it. Fund the account
+with what you are willing to write off, and treat `-max-daily-loss-jpy` as the
+brake that stops you finding out.

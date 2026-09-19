@@ -97,6 +97,11 @@ func (r Report) view() pageView {
 		{"input tokens", human(r.InputTokens), fmt.Sprintf("%.0f per call", perCall(r)), ""},
 	}
 
+	if r.IsLive() {
+		v.Warnings = append(v.Warnings,
+			"This run places real orders on bitbank. The figures below are money, not a simulation.")
+	}
+
 	// The cadence is an input, not a measurement, and every "expected" count on
 	// this page hangs off it. Say so when the data disagrees, rather than
 	// reporting a healthy run as a broken one.
@@ -176,10 +181,23 @@ func paperTiles(r Report) []tile {
 // after them is the comparison the whole phase exists to make: an all-taker
 // round trip on a JPY alt is 24bps, which is larger than most of the moves
 // this experiment is trying to predict.
+//
+// The same section serves live mode, with one path instead of two and a title
+// that does not pretend the money is imaginary.
 func (r Report) paperSection() section {
+	title := "Paper execution — maker against taker"
 	note := "The same answers, executed two ways. Taker crosses the spread and always fills; " +
 		"maker rests at the touch, earns the rebate, and often does not fill at all. " +
 		"Gross is before fees, net is after — the difference is the cost of getting in and out."
+
+	if r.IsLive() {
+		title = "Live execution — real orders, real money"
+		note = "These are filled orders on bitbank, not a simulation. " +
+			"Gross is before fees, net is after. " +
+			"The brake column is the risk layer's verdict: trade means entries are allowed, " +
+			"exit_only means it will close but not open, halt means it places nothing."
+	}
+
 	for _, p := range r.Paper {
 		if p.Working > 0 || p.Size > 0 {
 			continue
@@ -189,12 +207,16 @@ func (r Report) paperSection() section {
 		}
 	}
 
+	head := []string{"path", "position", "round trips", "up", "gross", "fees", "net", "unrealised"}
+	if r.IsLive() {
+		head = []string{"path", "brake", "why", "position", "round trips", "up", "gross", "fees", "net"}
+	}
 	s := section{
-		Title:   "Paper execution — maker against taker",
+		Title:   title,
 		Note:    note,
 		Summary: "Per path",
 		Open:    true,
-		Head:    []string{"path", "position", "round trips", "up", "gross", "fees", "net", "unrealised"},
+		Head:    head,
 	}
 	for _, p := range r.Paper {
 		pos := "flat"
@@ -203,6 +225,13 @@ func (r Report) paperSection() section {
 		}
 		if p.Working > 0 {
 			pos += fmt.Sprintf(" (+%d working)", p.Working)
+		}
+		if r.IsLive() {
+			s.Table = append(s.Table, []string{
+				p.Style, p.Intent, p.Gate, pos, fmt.Sprint(p.Trips), fmt.Sprint(p.Wins),
+				jpy(p.GrossJPY), jpy(p.FeesJPY), jpy(p.NetJPY),
+			})
+			continue
 		}
 		s.Table = append(s.Table, []string{
 			p.Style, pos, fmt.Sprint(p.Trips), fmt.Sprint(p.Wins),

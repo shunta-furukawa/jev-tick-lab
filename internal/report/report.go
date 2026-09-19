@@ -170,6 +170,18 @@ type Report struct {
 	Calibration calib.Report
 }
 
+// IsLive reports whether this log came from a run that placed real orders.
+// The page says so in words rather than leaving a reader to infer it from a
+// path name, because the difference between this and paper mode is money.
+func (r Report) IsLive() bool {
+	for _, p := range r.Paper {
+		if p.Style == "live" {
+			return true
+		}
+	}
+	return false
+}
+
 // noulGates maps a question to the threshold that reads its answer, so the
 // distribution can be drawn against the line that actually matters rather than
 // against an arbitrary axis.

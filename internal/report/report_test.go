@@ -483,3 +483,51 @@ func TestTheTapeMarksWhereThePositionChangedHands(t *testing.T) {
 		t.Error("the first tick in the window was marked as an execution")
 	}
 }
+
+func TestALiveRunSaysSoInWordsRatherThanLeavingItToBeInferred(t *testing.T) {
+	t.Parallel()
+	// The difference between this page and the paper one is money. A reader
+	// must not have to notice a path called "live" to work that out.
+	recs := records(20, func(i int, r *obs.Record) {
+		r.Mode = "live"
+		r.Paper = []exec.StyleState{{
+			Style: "live", Intent: "trade", Gate: "no brake on",
+			RoundTrip: 1, Wins: 1, NetJPY: -7.2, FeesJPY: 7.2,
+		}}
+	})
+	rep := Build(recs, DefaultOptions())
+	if !rep.IsLive() {
+		t.Fatal("a live log was not recognised as live")
+	}
+
+	page, err := rep.HTML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(page, "real orders") {
+		t.Error("the page does not warn that this is real money")
+	}
+	if strings.Contains(page, "Paper execution") {
+		t.Error("a live run is labelled as paper execution")
+	}
+	// And the brake state has to be visible, since it is the thing that
+	// decides whether the bot is still allowed to trade.
+	if !strings.Contains(page, "no brake on") {
+		t.Error("the risk verdict is not shown")
+	}
+}
+
+func TestAPaperRunIsNeverLabelledLive(t *testing.T) {
+	t.Parallel()
+	rep := Build(paperRecords(20, 5, 10), DefaultOptions())
+	if rep.IsLive() {
+		t.Fatal("a paper log was reported as live")
+	}
+	page, err := rep.HTML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(page, "real orders") {
+		t.Error("a paper run claims to place real orders")
+	}
+}
