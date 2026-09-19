@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 	"github.com/shunta-furukawa/jev-tick-lab/internal/jev"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/marketstate"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/obs"
+	"github.com/shunta-furukawa/jev-tick-lab/internal/report"
 	"github.com/shunta-furukawa/jev-tick-lab/internal/stream"
 )
 
@@ -40,18 +42,22 @@ func main() {
 		// Phase 1's exit criterion is "the state text renders correctly against
 		// live data", which needs a way to actually look at it.
 		printState = flag.Bool("print-state", false, "in observe mode, print the rendered state text each tick")
+
+		// Watching a collection through three CLI tools is a chore, and a chore
+		// you will not do is a collection you are not really watching.
+		serve = flag.String("serve", "", "also serve the live dashboard here, e.g. 127.0.0.1:8080")
 	)
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if err := run(log, *pair, *mode, *model, *logDir, *tick, *timeout, *minHist, *printState); err != nil {
+	if err := run(log, *pair, *mode, *model, *logDir, *tick, *timeout, *minHist, *printState, *serve); err != nil {
 		log.Error("exiting", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minHist time.Duration, printState bool) error {
+func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minHist time.Duration, printState bool, serveAddr string) error {
 	switch mode {
 	case "observe", "shadow":
 	case "paper":
@@ -124,6 +130,33 @@ func run(log *slog.Logger, pair, mode, model, logDir string, tick, timeout, minH
 		}); err != nil {
 			return fmt.Errorf("write run header: %w", err)
 		}
+	}
+
+	// The dashboard reads the same files the logger writes, so it never touches
+	// the tick loop. An HTTP handler that panics is recovered by net/http and
+	// cannot take the collector down with it.
+	if serveAddr != "" {
+		if mode == "observe" {
+			log.Warn("observe mode writes no records, so the dashboard will stay empty", "addr", serveAddr)
+		}
+		srv := &http.Server{
+			Addr: serveAddr,
+			Handler: report.Handler(logDir, report.Options{
+				TickInterval: tick,
+				HorizonSec:   report.DefaultOptions().HorizonSec,
+				BandBps:      report.DefaultOptions().BandBps,
+				Buckets:      report.DefaultOptions().Buckets,
+				PricePerMTok: report.DefaultOptions().PricePerMTok,
+			}),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			log.Info("dashboard", "url", "http://"+serveAddr)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Error("dashboard stopped", "err", err)
+			}
+		}()
+		defer srv.Close()
 	}
 
 	client := jev.New(apiKey, model)

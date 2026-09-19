@@ -102,6 +102,13 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
   .meta { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0 0 22px;
           color: var(--text-secondary); font-size: 12.5px; }
   .meta b { color: var(--text-primary); font-weight: 600; }
+  .meta .live { display: inline-flex; align-items: center; gap: 6px; color: var(--text-primary);
+                font-weight: 600; }
+  .meta .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--good);
+                  animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  @media (prefers-reduced-motion: reduce) { .meta .live i { animation: none } }
+  .meta .fresh { color: var(--muted); }
 
   .warn { border: 1px solid var(--border); border-left: 3px solid var(--critical);
           background: var(--surface-1); border-radius: 8px; padding: 10px 14px;
@@ -159,7 +166,9 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
   <h1>{{.Title}} {{with .Subtitle}}<span>· {{.}}</span>{{end}}</h1>
 
   <div class="meta">
+    {{if .Live}}<span class="live"><i></i>live</span>{{end}}
     {{range .Meta}}<span>{{index . 0}} <b>{{index . 1}}</b></span>{{end}}
+    {{with .LiveNote}}<span class="fresh">{{.}}</span>{{end}}
   </div>
 
   {{with .Warning}}<div class="warn">{{.}}</div>{{end}}
@@ -194,6 +203,22 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
 
 <div id="tip" role="status" aria-live="polite"></div>
 <script>
+{{if .Live}}
+// Reload on a timer rather than a socket: the page is a few tens of KB and the
+// collector writes every few seconds, so polling is both simpler and enough.
+// The scroll position survives, because a dashboard that jumps to the top every
+// ten seconds is a dashboard nobody keeps open.
+(function () {
+  try {
+    var y = sessionStorage.getItem('jtl-scroll');
+    if (y) { window.scrollTo(0, parseInt(y, 10)); }
+  } catch (e) {}
+  setTimeout(function () {
+    try { sessionStorage.setItem('jtl-scroll', String(window.scrollY)); } catch (e) {}
+    location.reload();
+  }, 10000);
+})();
+{{end}}
 // A hover layer with no dependencies: every mark carries data-tip, and a
 // native <title> underneath covers the no-JS and screen-reader cases.
 (function () {

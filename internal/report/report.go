@@ -103,6 +103,10 @@ type Report struct {
 	Intents  []Count
 	Dists    []Dist
 
+	// Live is set when the page is being served rather than written to a file:
+	// it adds the reload and the freshness line.
+	Live bool
+
 	// Filled only when the log has been through cmd/fill.
 	HasOutcomes bool
 	Calibration calib.Report

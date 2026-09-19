@@ -1,4 +1,4 @@
-.PHONY: help build build-linux build-all run-observe run-shadow dump logcheck report preflight preflight-dry check test race vet fmt fmt-check tidy clean deploy
+.PHONY: help build build-linux build-all run-observe run-shadow dump logcheck watch serve report preflight preflight-dry check test race vet fmt fmt-check tidy clean deploy
 
 # `make help` lists what exists. If a target you expect is missing, the checkout
 # is older than you think — see the phase order in CLAUDE.md.
@@ -6,6 +6,8 @@ help:
 	@echo "jev-tick-lab targets:"
 	@echo
 	@echo "  running"
+	@echo "    watch           collect AND serve the live dashboard, one command"
+	@echo "    serve           just the dashboard, against ./data"
 	@echo "    run-observe     phase 1: stream and state only, no model calls, no key"
 	@echo "    run-shadow      phase 2: evaluate and log at the deployed 3s cadence"
 	@echo "    dump            raw exchange frames, for re-checking the stream contract"
@@ -48,6 +50,15 @@ dump:
 # Is the collection still producing a usable dataset?
 logcheck:
 	go run ./cmd/logcheck -dir ./data -window 1h
+
+# Collect and watch in one command: the dashboard is at http://127.0.0.1:8080
+watch:
+	go run ./cmd/bot -pair xrp_jpy -mode shadow -model jev-1.13.0 -tick 3s \
+		-log-dir ./data -serve 127.0.0.1:8080
+
+# Just the dashboard, against whatever is already in ./data.
+serve:
+	go run ./cmd/serve -dir ./data -tick 3s
 
 # A self-contained HTML page from a tick log. Add -in a filled log for the
 # reliability curve.

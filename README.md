@@ -126,7 +126,17 @@ and never written to disk. Logs ship to GCS hourly.
 including what to do when the health check goes red, is in
 [docs/operations.md](docs/operations.md).
 
-### Looking at it
+### Watching it
+
+```bash
+make watch      # collect and serve the dashboard, one command
+```
+
+Then open <http://127.0.0.1:8080>. The page rebuilds as the log grows and says
+how stale it is, so a stopped collector is visible without reading a log file.
+`make serve` gives the same dashboard against data you already have.
+
+### Taking it with you
 
 ```bash
 go run ./cmd/report -in data/ticks-2026-09-18-filled.jsonl -tick 3s
@@ -168,6 +178,7 @@ internal/exec/        fill simulation (phase 4, not implemented)
 cmd/logcheck/         hourly health verdict, exit code is the interface
 cmd/preflight/        one real API call, fully checked, before a long run
 cmd/report/           a self-contained HTML page of a run
+cmd/serve/            the same page, live over HTTP
 internal/report/      its summaries and SVG
 terraform/            the VM and its surroundings
 deploy/               systemd units, secret fetch, log shipping, deploy script

@@ -1,6 +1,12 @@
 package report
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -164,4 +170,99 @@ func TestARestartIsCalledOut(t *testing.T) {
 	if !strings.Contains(html, "build_revision") {
 		t.Error("a window spanning two runs should point at the build revision")
 	}
+}
+
+func TestHandlerServesAndRebuildsWhenTheLogGrows(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ticks-2026-09-19.jsonl")
+
+	write := func(recs []obs.Record) {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		enc := json.NewEncoder(f)
+		for _, r := range recs {
+			if err := enc.Encode(r); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	write(records(100))
+
+	srv := httptest.NewServer(Handler(dir, DefaultOptions()))
+	defer srv.Close()
+
+	body := get(t, srv.URL+"/")
+	if !strings.Contains(body, ">live<") {
+		t.Error("a served page should carry the live badge")
+	}
+	if !strings.Contains(body, "jtl-scroll") {
+		t.Error("a served page should keep its scroll position across reloads")
+	}
+
+	var health struct {
+		OK      bool `json:"ok"`
+		Records int  `json:"records"`
+	}
+	if err := json.Unmarshal([]byte(get(t, srv.URL+"/healthz")), &health); err != nil {
+		t.Fatal(err)
+	}
+	if !health.OK || health.Records != 100 {
+		t.Fatalf("healthz = %+v, want ok with 100 records", health)
+	}
+
+	// The cache must notice the file growing, or a live dashboard is a
+	// screenshot.
+	time.Sleep(10 * time.Millisecond)
+	more := records(50)
+	for i := range more {
+		more[i].At = more[i].At.Add(10 * time.Minute)
+	}
+	write(more)
+
+	if err := json.Unmarshal([]byte(get(t, srv.URL+"/healthz")), &health); err != nil {
+		t.Fatal(err)
+	}
+	if health.Records != 150 {
+		t.Errorf("records = %d after appending, want 150", health.Records)
+	}
+}
+
+// Before the first record there is nothing to draw, and that is warmup rather
+// than a fault.
+func TestHandlerExplainsItselfBeforeTheFirstRecord(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(Handler(t.TempDir(), DefaultOptions()))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 while there is nothing to show", resp.StatusCode)
+	}
+	if !strings.Contains(string(b), "min-history") {
+		t.Error("the waiting page should say what it is waiting for")
+	}
+}
+
+func get(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

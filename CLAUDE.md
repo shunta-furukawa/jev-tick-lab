@@ -124,6 +124,7 @@ bitbank public WS ──▶ stream ──▶ marketstate (book, 1s bars, indicat
 | `cmd/logcheck` | Hourly health verdict on the collection. Exit 0 healthy, 1 degraded, 2 could not tell |
 | `cmd/preflight` | One real call to TypeSafe, then checks the whole response. Run it before any long collection. `-dry-run` needs no key |
 | `cmd/report` | One self-contained HTML page from a tick log: collection health, answer distributions against the gates that read them, and the reliability curve once the log has been filled |
+| `cmd/serve` | The same page over HTTP, rebuilt as the log grows. Localhost only — `cmd/bot -serve` runs it in-process |
 
 ### Key design decisions and why
 
@@ -198,6 +199,13 @@ changed renderer, and the state text is the biggest lever on answer quality
 there is. `go build` stamps the revision automatically; `go run` does not, so a
 local run records `unknown (go run)` rather than an empty field that could be
 mistaken for a missing one.
+
+**The dashboard reads files; it never touches the tick loop.** `cmd/bot -serve`
+runs the handler in a goroutine over the same directory the logger writes, so
+the collector has no idea it exists. A panicking HTTP handler is recovered by
+`net/http` and cannot take the collection down. It binds to localhost: there is
+nothing to authenticate and no reason for a run to be reachable from the
+network.
 
 **The report is one file with nothing outside it.** `cmd/report` writes a single
 HTML page — no CDN, no fonts, no external scripts — because it has to open from
@@ -474,25 +482,34 @@ That is what the step is for.
 
 ## Next, in order
 
-Ordered by what it costs to find out you are wrong. Everything up to step 2 runs
-on a laptop and costs under a dollar; only then is it worth building a VM.
+Ordered by what it costs to find out you are wrong, and by what it costs to
+stay interested. Steps 1 and 2 are done; step 3 needs nothing but a laptop that
+stays awake.
 
 1. ~~`make preflight`~~ — **done 2026-09-18.** The contract holds, latency is
-   535ms, and the token count is measured. It also exposed the cold-start state
-   defect that `-min-history` and the renderer now fix. Worth one more call from
-   the VM once it exists, to measure latency on the path that will actually run.
+   535ms cold and ~230ms in a live run, and the token count is measured. It also
+   exposed the cold-start state defect that `-min-history` and the renderer now
+   fix.
 
 2. ~~A short local shadow run~~ — **done 2026-09-18.** 195 records, 100% tick
-   density, zero failed calls, logcheck HEALTHY. The record schema, the gates,
-   the logger and the health check have now met real answers.
+   density, zero failed calls, logcheck HEALTHY.
 
-3. **`terraform apply`, then seed the secret.** See
-   [docs/operations.md](docs/operations.md). Nothing here has been applied to a
-   real project, so budget for fixing something on the first attempt.
+3. **One full day, locally.** `make watch` collects and serves the dashboard at
+   `http://127.0.0.1:8080` in one command. Disable sleep; a closed lid is a hole
+   in the series. A day is ~28,800 records at 3s, which is enough to see whether
+   the questions discriminate at all and whether any of them has usable ground
+   truth — and it costs $1.81 and no infrastructure.
 
-4. **Deploy and run phase 2 for several days.** The whole point, and it needs no
-   execution code. Pin `-model` and leave it alone. Watch the hourly logcheck
-   verdict rather than the tick log.
+   This is deliberately *less* than phase 2's exit criterion. It is a decision
+   point, not the dataset: after a day you will know whether several days are
+   worth building a VM for, which is a much better-informed question than the
+   one you can ask today.
+
+4. **Then decide about the VM.** `terraform apply` and `deploy/deploy.sh` are
+   written and have never been run. The case for them is unattended multi-day
+   collection, which a laptop cannot give you: it sleeps, it reboots, it moves
+   between networks, and every one of those is a gap. ~$12 for five days.
+   See [docs/operations.md](docs/operations.md).
 
 5. **Phase 3.** Expect to find that some question has no usable ground truth.
    Start with `book_pressure`: phase 1 measured the book as bid-heavy 70% of the

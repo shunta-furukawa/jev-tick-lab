@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/shunta-furukawa/jev-tick-lab/internal/calib"
 )
@@ -46,12 +47,22 @@ type pageView struct {
 	Tiles    []tile
 	Sections []section
 	Warning  string
+	Live     bool
+	LiveNote string
 }
 
 func (r Report) view() pageView {
 	v := pageView{
 		Title:    "jev-tick-lab",
 		Subtitle: r.Pair,
+		Live:     r.Live,
+	}
+	if r.Live {
+		age := time.Since(r.To)
+		v.LiveNote = fmt.Sprintf("newest record %s ago", round(age))
+		if age > 2*time.Minute {
+			v.LiveNote += " — the collector may have stopped"
+		}
 	}
 	if r.Records == 0 {
 		v.Warning = "No records. Has the collector written anything yet?"
